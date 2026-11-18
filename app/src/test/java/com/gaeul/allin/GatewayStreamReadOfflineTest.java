@@ -67,8 +67,14 @@ public final class GatewayStreamReadOfflineTest {
         check(in.read(buffer,0,0)==0 && in.read(buffer,0,1)==-1,"EOF read contract");
         in.close(); check(source.closes==1 && conn.disconnects==1,"normal close must release source and connection");
     }
-    static JSONObject tool(String arguments) {
-        return new JSONObject().put("tool_calls",new JSONArray().put(new JSONObject().put("index",0).put("function",new JSONObject().put("arguments",arguments))));
+    static JSONObject tool(String arguments, boolean first) {
+        JSONObject function = new JSONObject().put("arguments", arguments);
+        JSONObject call = new JSONObject().put("index", 0).put("function", function);
+        if (first) {
+            call.put("id", "call_unmask_fixture");
+            function.put("name", "fixture_tool");
+        }
+        return new JSONObject().put("tool_calls", new JSONArray().put(call));
     }
     static List<JSONObject> jsonEvents(String data) {
         List<JSONObject> events=new ArrayList<>();
@@ -81,9 +87,9 @@ public final class GatewayStreamReadOfflineTest {
         mask.placeholderToReal.put("{{MASK_EMAIL_b}}","real-email");
         mask.placeholderToReal.put("{{MASK_NAME_c}}","real-name");
         String wire=event(new JSONObject().put("content","C{{MASK_PHO").put("reasoning_content","R{{MASK_EMA"),JSONObject.NULL)
-                +event(tool("{\"name\":\"{{MASK_NA"),JSONObject.NULL)
+                +event(tool("{\"name\":\"{{MASK_NA", true),JSONObject.NULL)
                 +event(new JSONObject().put("content","NE_a}}!").put("reasoning_content","IL_b}}!"),JSONObject.NULL)
-                +event(tool("ME_c}}\"}"),JSONObject.NULL)+done();
+                +event(tool("ME_c}}\"}", false),JSONObject.NULL)+done();
         Source source=new Source(wire); InputStream in=stream(gateway(),source,new Connection(),mask,null);
         String data=ResponsesGatewayOfflineTest.read(in); in.close();
         StringBuilder content=new StringBuilder(), reasoning=new StringBuilder(), args=new StringBuilder();

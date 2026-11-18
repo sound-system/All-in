@@ -11,7 +11,6 @@ import com.gaeul.allin.json.*;
 /** Converts Qoder's SSE envelopes to OpenAI chat-completion SSE. */
 public final class QoderStream {
     private QoderStream() {}
-    private static final long FIRST_EVENT_MS = 120_000L;
     private static final int FRAME_LIMIT = 1024 * 1024;
     private static final int TOOL_LIMIT = 1024 * 1024;
     // Live output is incremental and has no total cap; aggregation and non-business runs are bounded.
@@ -66,16 +65,9 @@ public final class QoderStream {
     public static Stream open(QoderAuth.SignIn si, JSONObject body, JSONObject original,
                               String model, QoderAuth.ConnectionFactory factory,
                               RequestContext context, Observer observer) throws Exception {
-        return open(si, body, original, model, factory, context, observer, System::nanoTime);
-    }
-
-    static Stream open(QoderAuth.SignIn si, JSONObject body, JSONObject original,
-                       String model, QoderAuth.ConnectionFactory factory,
-                       RequestContext context, Observer observer, java.util.function.LongSupplier clock) throws Exception {
         HttpURLConnection conn = null;
         InputStream source = null;
         boolean sent = false, attached = false;
-        FirstEvent first = new FirstEvent(context, clock);
         try {
             if (context != null) context.check();
             String wire = QoderAuth.encodeBody(body.toString());
@@ -91,7 +83,7 @@ public final class QoderStream {
             conn.setRequestMethod("POST");
             conn.setDoOutput(true);
             conn.setConnectTimeout(Math.min(15000, timeout(context)));
-            conn.setReadTimeout(first.timeout());
+            conn.setReadTimeout(timeout(context));
             byte[] bytes = wire.getBytes(StandardCharsets.UTF_8);
             conn.setFixedLengthStreamingMode(bytes.length);
             conn.setRequestProperty("Content-Type", "application/json");
@@ -108,10 +100,10 @@ public final class QoderStream {
                 if (context != null) context.check();
             }
             if (context != null) context.check();
-            conn.setReadTimeout(first.timeout());
+            conn.setReadTimeout(timeout(context));
             int status = conn.getResponseCode();
             source = status >= 200 && status < 300 ? conn.getInputStream() : conn.getErrorStream();
-            if (source != null) source = contextInput(source, conn, first);
+            if (source != null) source = contextInput(source, conn, context);
             String encoding = conn.getContentEncoding();
             source = decodeEncoding(source, encoding);
             if (status < 200 || status >= 300)
@@ -120,9 +112,6 @@ public final class QoderStream {
             if (source == null) throw new IOException("Missing Qoder response stream");
             Stream stream = new Stream(conn, source, original, model, context, observer);
             stream.prime();
-            first.timeout();
-            first.complete = true;
-            conn.setReadTimeout(timeout(context));
             // Ownership transfers only after priming succeeds.
             conn = null;
             source = null;
@@ -135,9 +124,6 @@ public final class QoderStream {
                 conn.disconnect();
             }
             if (ex instanceof Failure) throw ex;
-            if (sent && ex instanceof java.net.SocketTimeoutException && (context == null || !context.isCancelled())) {
-                throw new Failure(504, 0, 0, true, "Qoder did not send a complete first event in time; request was not replayed");
-            }
             throw new Failure(502, 0, 0, sent, sent ? "Qoder transport or stream failed" : "Qoder request could not be started");
         }
     }
@@ -146,41 +132,13 @@ public final class QoderStream {
         return context == null ? 300000 : (int) Math.max(1, Math.min(300000L, context.remainingMillis()));
     }
 
-    private static final class FirstEvent {
-        final RequestContext context;
-        final java.util.function.LongSupplier clock;
-        final long deadline;
-        boolean complete;
-
-        FirstEvent(RequestContext context, java.util.function.LongSupplier clock) {
-            this.context = context;
-            this.clock = clock;
-            this.deadline = clock.getAsLong() + FIRST_EVENT_MS * 1_000_000L;
-        }
-
-        int timeout() throws IOException {
-            if (context != null) context.check();
-            if (complete) return QoderStream.timeout(context);
-            long left = deadline - clock.getAsLong();
-            if (left <= 0) throw new java.net.SocketTimeoutException("Qoder first event deadline");
-            return (int)Math.min(QoderStream.timeout(context), (left + 999_999L) / 1_000_000L);
-        }
-    }
-
-    private static InputStream contextInput(InputStream source, HttpURLConnection conn, FirstEvent first) {
+    private static InputStream contextInput(InputStream source, HttpURLConnection conn, RequestContext context) {
+        if (context == null) return source;
         return new FilterInputStream(source) {
-            private void before() throws IOException { conn.setReadTimeout(first.timeout()); }
-            @Override public int read() throws IOException {
-                before();
-                int count = in.read();
-                first.timeout();
-                return count;
-            }
+            private void before() throws IOException { context.check(); conn.setReadTimeout(timeout(context)); }
+            @Override public int read() throws IOException { before(); int n = in.read(); context.check(); return n; }
             @Override public int read(byte[] b, int off, int len) throws IOException {
-                before();
-                int count = in.read(b, off, len);
-                first.timeout();
-                return count;
+                before(); int n = in.read(b, off, len); context.check(); return n;
             }
         };
     }

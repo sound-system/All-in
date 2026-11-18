@@ -46,7 +46,6 @@ final class ZCodePlanGate {
         }
         State fresh = read(site, key, factory);
         synchronized (this) {
-            if (fresh == State.UNKNOWN && reading.result == State.NO_PLAN) fresh = State.NO_PLAN;
             reading.result = fresh;
             reading.until = System.nanoTime() + (fresh == State.ACTIVE ? ACTIVE_MS : FAILURE_MS) * 1_000_000L;
             reading.reading = false;

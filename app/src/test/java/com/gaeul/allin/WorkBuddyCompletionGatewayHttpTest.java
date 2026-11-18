@@ -24,5 +24,39 @@ public final class WorkBuddyCompletionGatewayHttpTest {
    }else check(result.status==502,"invalid completion should fail "+scenario+" "+result.status+" "+result.body);
   }
  }
- public static void main(String[]args)throws Exception{for(String s:new String[]{"length","tool-length","missing","unknown","error"})run(s);System.out.println("WorkBuddyCompletionGatewayHttpTest PASS");}
+ static JSONObject call(String id, String name, String args) {
+  JSONObject fn = new JSONObject();
+  if (name != null) fn.put("name", name);
+  if (args != null) fn.put("arguments", args);
+  JSONObject call = new JSONObject().put("index", 0).put("function", fn);
+  if (id != null) call.put("id", id);
+  return new JSONObject().put("tool_calls", new JSONArray().put(call));
+ }
+ static void terminalTools(boolean stream, String scenario) throws Exception {
+  boolean valid = "split".equals(scenario);
+  String source = (valid
+      ? chunk(call("call_fixture", "get_", null), null)
+          + chunk(call("", "status", null), null) + chunk(call(null, "", "{}"), null)
+      : "missing".equals(scenario) ? chunk(call("call_fixture", null, "{}"), null) : "")
+      + chunk(new JSONObject().put("tool_calls", new JSONArray()), "tool_calls") + "data: [DONE]\n\n";
+  try (VendorPolicyGatewayHttpTest.Upstream upstream = new VendorPolicyGatewayHttpTest.Upstream((req,n)->new VendorPolicyGatewayHttpTest.Reply(200,"text/event-stream",source));
+       VendorPolicyGatewayHttpTest.Gateway g = new VendorPolicyGatewayHttpTest.Gateway(WorkBuddyCompatibilityGatewayHttpTest.config(),upstream,false)) {
+   String path = "/v1/chat/completions";
+   DeepSeekHarnessGatewayHttpTest.Result result = DeepSeekHarnessGatewayHttpTest.post(g.getListeningPort(),path,WorkBuddyCompatibilityGatewayHttpTest.request(path,stream));
+   check(upstream.requests.size()==1,"no replay " + scenario);
+   if (!valid) {
+    check(result.status==(stream?200:502) && result.body.contains(ChatToolCompletion.ERROR) && !result.body.contains("[DONE]"), "explicit incomplete tool result " + result.status + " " + result.body);
+   } else if (stream) {
+    check(result.status==200 && result.body.contains("get_") && result.body.contains("status") && result.body.contains("[DONE]"), "valid continuation reaches terminal " + result.body);
+   } else {
+    JSONObject tool = new JSONObject(result.body).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getJSONArray("tool_calls").getJSONObject(0);
+    check(result.status==200 && "call_fixture".equals(tool.optString("id")) && "get_status".equals(tool.getJSONObject("function").optString("name")), "aggregate keeps id and name fragments");
+   }
+  }
+ }
+ public static void main(String[] args) throws Exception {
+  for(String s : new String[]{"length","tool-length","missing","unknown","error"}) run(s);
+  for(boolean stream : new boolean[]{false,true}) for(String s : new String[]{"split","missing","empty"}) terminalTools(stream,s);
+  System.out.println("WorkBuddyCompletionGatewayHttpTest PASS");
+ }
 }

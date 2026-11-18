@@ -81,10 +81,10 @@ public final class ZCodeBoundaryGatewayHttpTest {
                 try {
                     for (int i = 0; i < 2; i++) {
                         Reply reply = post(gateway.getListeningPort(), "/v1/responses", false);
-                        int expected = scenario == 204 ? 402 : scenario;
+                        int expected = scenario == 204 ? 402 : 200;
                         check(reply.status == expected, "subscription state " + scenario + " actual status " + reply.status + " reads=" + reads + " paid=" + paid + " gift=" + gift.opens + " body=" + reply.body);
                     }
-                    check(reads.get() == 1 && paid.get() == (scenario == 200 ? 2 : 0), "subscription state " + scenario + " exact plan reads and paid requests " + reads + "/" + paid);
+                    check(reads.get() == 1 && paid.get() == (scenario == 204 ? 0 : 2), "subscription state " + scenario + " exact plan reads and paid requests " + reads + "/" + paid);
                 } finally { gateway.stop(); }
             }
         }

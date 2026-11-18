@@ -74,10 +74,12 @@ public final class WorkBuddyStreamBlocksOfflineTest {
         String input=chunk(new JSONObject().put("tool_calls",new JSONArray().put(call)),"tool_calls")+"data: [DONE]\n\n";
         JSONObject actual=chunks(relay(input,true)).get(0).getJSONArray("choices").getJSONObject(0).getJSONObject("delta").getJSONArray("tool_calls").getJSONObject(0);
         check(actual.similar(call),"real tool identity and arguments preserved");
-        for(String finish:new String[]{"length","content_filter","tool_calls","stop"}) {
+        for(String finish:new String[]{"length","content_filter","stop"}) {
             JSONObject preserved=chunks(relay(chunk(new JSONObject().put("reasoning_content","thought").put("tool_calls",new JSONArray()),finish)+"data: [DONE]\n\n",true)).get(0);
             check(finish.equals(preserved.getJSONArray("choices").getJSONObject(0).getString("finish_reason")),"real finish preserved: "+finish);
         }
+        String emptyToolFinish = relay(chunk(new JSONObject().put("tool_calls", new JSONArray()), "tool_calls") + "data: [DONE]\n\n", true);
+        check(emptyToolFinish.contains(ChatToolCompletion.ERROR) && !emptyToolFinish.contains("[DONE]"), "tool finish without a call is an error");
         String error=relay("data: {\"error\":{\"message\":\"synthetic rejection\"}}\n\n",true);
         check(error.contains("synthetic rejection") && !error.contains("data: [DONE]"),"explicit error remains error");
         String broken=relay(chunk(new JSONObject().put("reasoning_content","partial").put("tool_calls",new JSONArray()),""),true);

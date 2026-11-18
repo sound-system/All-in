@@ -141,6 +141,17 @@ public final class WorkBuddyQuotaGatewayHttpTest {
         }
     }
 
+    private static void depletedAttemptBudget() throws Exception {
+        long reset = System.currentTimeMillis() / 1000 * 1000 + 3600000L;
+        JSONObject cfg = setup("workbuddy", true);
+        cfg.getJSONObject("failover").put("maxAttempts", 1);
+        try (MockUpstream upstream = new MockUpstream((req, n) -> rejected(error(windowMessage("workbuddy", reset), "quota_exceeded")));
+             GatewayHarness gateway = new GatewayHarness(cfg, upstream)) {
+            assertQuota(post(gateway.port(), CHAT, input("workbuddy/" + MODEL, CHAT, false), null), reset);
+            expect(upstream.requests.size() == 1, "verified quota survives one-send attempt budget");
+        }
+    }
+
     private static void gatewayRestartAndDashboard() throws Exception {
         long reset = System.currentTimeMillis() / 1000 * 1000 + 3600000L;
         JSONObject cfg = setup("workbuddy", false);
@@ -204,6 +215,7 @@ public final class WorkBuddyQuotaGatewayHttpTest {
             }
         }
         ordinaryFailures();
+        depletedAttemptBudget();
         gatewayRestartAndDashboard();
         expect(IngressMemoryBudget.usedBytes() == 0, "all request budgets released");
         System.out.println("WorkBuddyQuotaGatewayHttpTest passed " + checks + " checks");

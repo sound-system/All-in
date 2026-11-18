@@ -299,34 +299,8 @@ public final class QoderStreamOfflineTest {
         }
     }
 
-    static void firstEventDeadline() throws Exception {
-        QoderAuth.SignIn si = new QoderAuth.SignIn();
-        si.access = "fixture"; si.uid = "fixture"; si.machineId = "fixture";
-        JSONObject body = new JSONObject().put("model_config", new JSONObject().put("key", "m"));
-        java.util.concurrent.atomic.AtomicLong clock = new java.util.concurrent.atomic.AtomicLong();
-        Source heartbeat = new Source(": keepalive\n\n");
-        Fake silent = new Fake(200, heartbeat);
-        try {
-            QoderStream.open(si, body, original(), "m", url -> silent, null, null,
-                    () -> heartbeat.at > 0 ? 121_000_000_000L : clock.get());
-            throw new AssertionError("heartbeat kept silent Qoder request open");
-        } catch (QoderStream.Failure failure) {
-            check(failure.status == 504 && failure.sentOrUnknown && failure.retryAfter == 0, "first event has a distinct sent/unknown timeout");
-            check(silent.outputCalled && silent.getReadTimeout() <= 120000 && silent.disconnected && heartbeat.closed, "timeout releases the actual connection and stream");
-        }
-        Source normal = new Source(delta(new JSONObject().put("content", "start"), null)
-                + delta(new JSONObject().put("content", "end"), "stop") + done());
-        Fake active = new Fake(200, normal);
-        try (QoderStream.Stream stream = QoderStream.open(si, body, original(), "m", url -> active, null, null, clock::get)) {
-            clock.set(121_000_000_000L);
-            check(active.getReadTimeout() == 300000, "successful first event restores normal per-read timeout");
-            String output = read(stream);
-            check(output.contains("start") && output.contains("end") && output.contains("[DONE]"), "delivered stream can continue beyond initial deadline");
-        }
-    }
-
     public static void main(String[] args) throws Exception {
-        firstEventDeadline(); streamingAndUsage(); nativeTools(); failures(); contentEncoding(); textTools(); strictAndDelivery(); cumulativeUsageAndFinishValidation();
+        streamingAndUsage(); nativeTools(); failures(); contentEncoding(); textTools(); strictAndDelivery(); cumulativeUsageAndFinishValidation();
         System.out.println("QoderStreamOfflineTest OK");
     }
 }

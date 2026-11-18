@@ -9977,6 +9977,7 @@ public class GatewayServer extends NanoHTTPD {
             private boolean sawFinish = false;
             private final java.util.Set<Integer> seenChoices = new java.util.HashSet<>();
             private final java.util.Set<Integer> finishedChoices = new java.util.HashSet<>();
+            private final java.util.Map<Integer, ChatToolCompletion> choiceTools = new java.util.HashMap<>();
             private boolean choicesComplete() { return sawFinish && finishedChoices.containsAll(seenChoices); }
             private boolean sawError = false;
             private boolean downstreamCancelled;
@@ -10060,10 +10061,22 @@ public class GatewayServer extends NanoHTTPD {
                                 if(choice==null) continue;
                                 int choiceIndex=choice.optInt("index",i);
                                 seenChoices.add(choiceIndex);
-                                if (choice.has("finish_reason") && !choice.isNull("finish_reason")
-                                        && !choice.optString("finish_reason", "").isEmpty()
-                                        && !"null".equals(choice.optString("finish_reason", ""))) {
-                                    sawFinish = true;finishedChoices.add(choiceIndex);
+                                JSONObject delta = choice.optJSONObject("delta");
+                                String finish = choice.optString("finish_reason", "");
+                                boolean terminal = !finish.isEmpty() && !"null".equals(finish);
+                                JSONArray calls = delta == null ? null : delta.optJSONArray("tool_calls");
+                                ChatToolCompletion tools = choiceTools.get(choiceIndex);
+                                if (calls != null && calls.length() > 0 && tools == null) {
+                                    if (choiceTools.size() >= 128) return invalidToolCompletion();
+                                    tools = new ChatToolCompletion();
+                                    choiceTools.put(choiceIndex, tools);
+                                }
+                                if (tools != null && !tools.observe(calls)) return invalidToolCompletion();
+                                if (terminal) {
+                                    if ((tools != null && !tools.valid(finish)) || (tools == null && "tool_calls".equals(finish)))
+                                        return invalidToolCompletion();
+                                    sawFinish = true;
+                                    finishedChoices.add(choiceIndex);
                                 }
                             }
                         } catch (com.gaeul.allin.json.JSONException ignored) {}
@@ -10186,6 +10199,14 @@ public class GatewayServer extends NanoHTTPD {
                 int count = Math.min(len - 1, currentChunkIs.available());
                 if (count > 0) currentChunkIs.read(b, off + 1, count);
                 return count + 1;
+            }
+
+            private int invalidToolCompletion() throws IOException {
+                sawError = true;
+                emittedTerminalError = true;
+                RequestDiagnostics.protocolFailure(uRow);
+                currentChunkIs = new ByteArrayInputStream(openAiStreamError(ChatToolCompletion.ERROR).getBytes("UTF-8"));
+                return currentChunkIs.read();
             }
 
             @Override public void onWriteStart() { writeStarted = true; }
@@ -11697,16 +11718,16 @@ public class GatewayServer extends NanoHTTPD {
             }
             break;
             }
-            if (exhausted) {
-                terminalStatus = 503; terminalError = "Upstream attempt budget exhausted";
-                return errorResponse(503, terminalError);
-            }
             if (earliestWorkBuddyReset != Long.MAX_VALUE && (last == null || last.workBuddyQuotaReset > 0)) {
                 terminalStatus = 429;
                 terminalError = workBuddyQuotaMessage(earliestWorkBuddyReset);
                 lastTarget = earliestWorkBuddyTarget;
                 logical.terminalErrorCode = "workbuddy_model_quota_exhausted";
                 return workBuddyQuotaResponse(earliestWorkBuddyReset, terminalError, guardResult);
+            }
+            if (exhausted) {
+                terminalStatus = 503; terminalError = "Upstream attempt budget exhausted";
+                return errorResponse(503, terminalError);
             }
             if (cooled && (last == null
                     || (lastTarget != null && lastTarget.commercialCandidates != null))) {
@@ -12673,7 +12694,8 @@ public class GatewayServer extends NanoHTTPD {
         String site = target.account.optString("site", "zai");
         String identity = CredentialIdentity.credential("zcode", target.baseUrl, null, null, target.apiKey);
         ZCodePlanGate.State state = zcodePlanGate().state(site + "/" + identity, site, target.apiKey, this::openVendorConnection);
-        if (state == ZCodePlanGate.State.ACTIVE) return null;
+        // A failed metadata read does not establish that the inference key is unusable.
+        if (state != ZCodePlanGate.State.NO_PLAN) return null;
         RecentUsageScheduler.Lease lease = ATTEMPT_LEASE.get();
         if (lease != null) lease.cancel();
         Attempt out = new Attempt();
@@ -12682,12 +12704,188 @@ public class GatewayServer extends NanoHTTPD {
         out.localRejection = true;
         out.zcodePlanDenied = true;
         out.safeZcodeRejection = true;
-        out.status = state == ZCodePlanGate.State.NO_PLAN ? 402 : 503;
-        out.body = state == ZCodePlanGate.State.NO_PLAN
-                ? "ZCode 账号无有效 Coding Plan，请选择赠送额度支持的模型"
-                : "暂未确认 ZCode Coding Plan，请稍后重试或选择赠送额度支持的模型";
+        out.status = 402;
+        out.body = "ZCode 账号无有效 Coding Plan，请选择赠送额度支持的模型";
         out.response = errorResponse(out.status, out.body);
         applyGuardHeaders(out.response, guardResult);
+        return out;
+    }
+
+    private Attempt aggregateWorkBuddyChat(InputStream is, Attempt out, String providerId, String requestedModel,
+                                           PrivacyMasker.Session maskSession, ContextGuard.Result guardResult) throws IOException {
+        BufferedReader br = new BoundedSseReader(new InputStreamReader(is, "UTF-8"));
+        StringBuilder contentAcc = new StringBuilder();
+        StringBuilder reasonAcc = new StringBuilder();
+        // 工具调用是分片增量（index + id/name 在首片，arguments 逐片累加），
+        // 之前这里只累加 content/reasoning，等于把 tool_calls 整个丢掉 ——
+        // 非流式客户端带 tools 时会拿到空回复。
+        java.util.Map<Integer, JSONObject> toolAcc =
+                new java.util.LinkedHashMap<Integer, JSONObject>();
+        String aggFinish = "";
+        JSONObject aggUsage = new JSONObject();
+        String line;
+        while ((line = br.readLine()) != null) {
+            if (line.startsWith("data:")) {
+                String data=line.substring(5).trim();
+                if(data.isEmpty() || "[DONE]".equals(data)) continue;
+                try {
+                    JSONObject chunk = new JSONObject(data);
+                    if (chunk.has("error") && !chunk.isNull("error")) return failedProtocolAttempt(out);
+                    {
+                        JSONObject reported=chunk.optJSONObject("usage");
+                        if(reported!=null) {
+                            mergeReportedUsage(aggUsage,reported);
+                            UsageLedger.Row ur=U_ROW.get(); if(ur!=null)absorbUsage(ur,reported);
+                        }
+                    }
+                    JSONArray choices = chunk.optJSONArray("choices");
+                    if (choices != null && choices.length() > 0) {
+                        JSONObject c0 = choices.getJSONObject(0);
+                        String fr = c0.optString("finish_reason", "");
+                        if (fr != null && !fr.isEmpty() && !"null".equals(fr)) aggFinish = fr;
+                        JSONObject delta = c0.optJSONObject("delta");
+                        if (delta != null) {
+                            contentAcc.append(delta.optString("content", ""));
+                            reasonAcc.append(delta.optString("reasoning_content", ""));
+                            JSONArray tcs = delta.optJSONArray("tool_calls");
+                            for (int ti = 0; tcs != null && ti < tcs.length(); ti++) {
+                                JSONObject tc = tcs.optJSONObject(ti);
+                                if (tc == null) continue;
+                                int idx = tc.optInt("index", ti);
+                                JSONObject acc = toolAcc.get(Integer.valueOf(idx));
+                                if (acc == null) {
+                                    acc = new JSONObject();
+                                    acc.put("index", idx);
+                                    acc.put("type", "function");
+                                    acc.put("function", new JSONObject());
+                                    toolAcc.put(Integer.valueOf(idx), acc);
+                                }
+                                String id = ChatToolCompletion.string(tc, "id");
+                                if (!id.isEmpty()) acc.put("id", ChatToolCompletion.mergeIdentity(acc.optString("id", ""), id));
+                                JSONObject fn = tc.optJSONObject("function");
+                                if (fn != null) {
+                                    JSONObject afn = acc.optJSONObject("function");
+                                    if (afn == null) afn = new JSONObject();
+                                    String fnName = ChatToolCompletion.string(fn, "name");
+                                    if (!fnName.isEmpty()) afn.put("name", ChatToolCompletion.mergeIdentity(afn.optString("name", ""), fnName));
+                                    if (fn.has("arguments")) {
+                                        afn.put("arguments", afn.optString("arguments", "")
+                                                + fn.optString("arguments", ""));
+                                    }
+                                    acc.put("function", afn);
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+        br.close();
+
+        if (!java.util.Arrays.asList("stop", "length", "tool_calls", "function_call", "content_filter").contains(aggFinish))
+            return failedProtocolAttempt(out);
+        boolean missingTool = "tool_calls".equals(aggFinish) && toolAcc.isEmpty();
+        for (JSONObject tool : toolAcc.values()) {
+            if (ChatToolCompletion.string(tool.optJSONObject("function"), "name").trim().isEmpty()) missingTool = true;
+        }
+        if (missingTool) {
+            failedProtocolAttempt(out);
+            out.body = ChatToolCompletion.ERROR;
+            out.response = errorResponse(502, out.body);
+            applyGuardHeaders(out.response, guardResult);
+            return out;
+        }
+        String finalContent = contentAcc.toString();
+        finalContent = PrivacyMasker.unmaskText(finalContent, maskSession);
+        // WorkBuddy's safety filter answers with one fixed sentence and
+        // finish_reason content_filter. Its plugin drops that sentence and keeps
+        // the finish, so the host can ask the group's next member instead of
+        // treating a refusal as an answer. Only the filter's own text is dropped.
+        if("content_filter".equals(aggFinish) && workbuddyFilterSaid(finalContent)) finalContent="";
+
+        JSONObject simulatedResp = new JSONObject();
+        simulatedResp.put("id", "chatcmpl-" + System.currentTimeMillis());
+        simulatedResp.put("object", "chat.completion");
+        simulatedResp.put("created", System.currentTimeMillis() / 1000);
+        simulatedResp.put("model", requestedModel);
+
+        JSONArray choices = new JSONArray();
+        JSONObject choice = new JSONObject();
+        choice.put("index", 0);
+        JSONObject msg = new JSONObject();
+        msg.put("role", "assistant");
+        msg.put("content", finalContent);
+        if (reasonAcc.length() > 0) msg.put("reasoning_content", reasonAcc.toString());
+        if (!toolAcc.isEmpty()) {
+            JSONArray tcsOut = new JSONArray();
+            for (JSONObject acc : toolAcc.values()) {
+                acc.remove("index");
+                tcsOut.put(acc);
+            }
+            msg.put("tool_calls", tcsOut);
+        }
+        choice.put("message", msg);
+        choice.put("finish_reason", aggFinish);
+        choices.put(choice);
+        simulatedResp.put("choices", choices);
+
+        if(aggUsage.length()>0) {
+            if(!aggUsage.has("total_tokens") && aggUsage.opt("prompt_tokens") instanceof Number
+                    && aggUsage.opt("completion_tokens") instanceof Number) {
+                long total=Math.max(0L,aggUsage.optLong("prompt_tokens",0))+Math.max(0L,aggUsage.optLong("completion_tokens",0));
+                aggUsage.put("total_tokens",Math.min(Integer.MAX_VALUE,total));
+            }
+            simulatedResp.put("usage",aggUsage);
+        } else {
+            JSONObject estimated=new JSONObject().put("prompt_tokens",10)
+                    .put("completion_tokens",finalContent.length()/2)
+                    .put("total_tokens",10+finalContent.length()/2).put("estimated",true);
+            simulatedResp.put("usage",estimated);
+            absorbUsage(U_ROW.get(),estimated); // Same explicitly estimated counters as the client.
+        }
+
+        // 这条聚合路径是独立拼装的，不走下面普通非流式那段，
+        // 所以响应侧的 think-tags / word-guard / model-map 别名都得在这里补一遍。
+        try {
+            JSONObject mwAgg = configJson.optJSONObject("middleware");
+            if (mwAgg != null) {
+                JSONObject aggMsg = msg;
+                String aggTxt = aggMsg.optString("content", "");
+                String aggRsn = aggMsg.optString("reasoning_content", "");
+                String[] aggFixed = Middleware.applyThinkTags(aggTxt, aggRsn, mwAgg);
+                if (!aggFixed[0].equals(aggTxt) || !aggFixed[1].equals(aggRsn)) {
+                    aggMsg.put("content", aggFixed[0]);
+                    if (aggFixed[1].isEmpty()) aggMsg.remove("reasoning_content");
+                    else aggMsg.put("reasoning_content", aggFixed[1]);
+                }
+                if (Middleware.wordGuardEnabled(mwAgg)) {
+                    aggMsg.put("content", Middleware.maskWords(aggMsg.optString("content", ""), mwAgg));
+                }
+            }
+            String aliasAgg = CLIENT_MODEL.get();
+            if (aliasAgg != null && !aliasAgg.isEmpty()) simulatedResp.put("model", aliasAgg);
+        } catch (Throwable ignored) {
+        }
+
+        out.ok = true;
+        out.textOut = finalContent;
+        out.reasoningOut = reasonAcc.toString();
+        if (wantsAnthropicOut()) {
+            // 这条聚合路径也要转格式，否则 /v1/messages 打到 WorkBuddy 会拿到 OpenAI 形状。
+            // 必须用 responseToAnthropic 走完整互转（含 tool_calls），
+            // 不能只拿 finalContent —— 那样会把工具调用丢掉。
+            JSONObject anth = checkedAnthropicResponse(simulatedResp, requestedModel);
+            Response resp = newFixedLengthResponse(Status.OK, "application/json; charset=UTF-8", anth.toString());
+            addCorsHeaders(resp);
+            applyGuardHeaders(resp, guardResult);
+            out.response = resp;
+            return out;
+        }
+        Response resp = newFixedLengthResponse(Status.OK, "application/json; charset=UTF-8", simulatedResp.toString());
+        resp.addHeader("X-Magpie-Served-By", out.modelRef == null ? providerId : out.modelRef);
+        addCorsHeaders(resp);
+        applyGuardHeaders(resp, guardResult);
+        out.response = resp;
         return out;
     }
 
@@ -13254,170 +13452,7 @@ public class GatewayServer extends NanoHTTPD {
             // WorkBuddy 上游强制流式，客户端要非流式时由网关聚合成一个完整回复
             if (("workbuddy".equals(target.providerId) || "workbuddy-ai".equals(target.providerId))
                     && !clientWantsStream) {
-                BufferedReader br = new BoundedSseReader(new InputStreamReader(is, "UTF-8"));
-                StringBuilder contentAcc = new StringBuilder();
-                StringBuilder reasonAcc = new StringBuilder();
-                // 工具调用是分片增量（index + id/name 在首片，arguments 逐片累加），
-                // 之前这里只累加 content/reasoning，等于把 tool_calls 整个丢掉 ——
-                // 非流式客户端带 tools 时会拿到空回复。
-                java.util.Map<Integer, JSONObject> toolAcc =
-                        new java.util.LinkedHashMap<Integer, JSONObject>();
-                String aggFinish = "";
-                JSONObject aggUsage = new JSONObject();
-                String line;
-                while ((line = br.readLine()) != null) {
-                    if (line.startsWith("data:")) {
-                        String data=line.substring(5).trim();
-                        if(data.isEmpty() || "[DONE]".equals(data)) continue;
-                        try {
-                            JSONObject chunk = new JSONObject(data);
-                            if (chunk.has("error") && !chunk.isNull("error")) return failedProtocolAttempt(out);
-                            {
-                                JSONObject reported=chunk.optJSONObject("usage");
-                                if(reported!=null) {
-                                    mergeReportedUsage(aggUsage,reported);
-                                    UsageLedger.Row ur=U_ROW.get(); if(ur!=null)absorbUsage(ur,reported);
-                                }
-                            }
-                            JSONArray choices = chunk.optJSONArray("choices");
-                            if (choices != null && choices.length() > 0) {
-                                JSONObject c0 = choices.getJSONObject(0);
-                                String fr = c0.optString("finish_reason", "");
-                                if (fr != null && !fr.isEmpty() && !"null".equals(fr)) aggFinish = fr;
-                                JSONObject delta = c0.optJSONObject("delta");
-                                if (delta != null) {
-                                    contentAcc.append(delta.optString("content", ""));
-                                    reasonAcc.append(delta.optString("reasoning_content", ""));
-                                    JSONArray tcs = delta.optJSONArray("tool_calls");
-                                    for (int ti = 0; tcs != null && ti < tcs.length(); ti++) {
-                                        JSONObject tc = tcs.optJSONObject(ti);
-                                        if (tc == null) continue;
-                                        int idx = tc.optInt("index", ti);
-                                        JSONObject acc = toolAcc.get(Integer.valueOf(idx));
-                                        if (acc == null) {
-                                            acc = new JSONObject();
-                                            acc.put("index", idx);
-                                            acc.put("type", "function");
-                                            acc.put("function", new JSONObject());
-                                            toolAcc.put(Integer.valueOf(idx), acc);
-                                        }
-                                        if (tc.has("id")) acc.put("id", tc.optString("id", ""));
-                                        JSONObject fn = tc.optJSONObject("function");
-                                        if (fn != null) {
-                                            JSONObject afn = acc.optJSONObject("function");
-                                            if (afn == null) afn = new JSONObject();
-                                            // 上游只在首片给 name，后续片带的是空串，
-                                            // 无条件覆盖会把工具名抹成 ""
-                                            String fnName = fn.optString("name", "");
-                                            if (!fnName.isEmpty()) afn.put("name", fnName);
-                                            if (fn.has("arguments")) {
-                                                afn.put("arguments", afn.optString("arguments", "")
-                                                        + fn.optString("arguments", ""));
-                                            }
-                                            acc.put("function", afn);
-                                        }
-                                    }
-                                }
-                            }
-                        } catch (Exception ignored) {}
-                    }
-                }
-                br.close();
-
-                if (!java.util.Arrays.asList("stop", "length", "tool_calls", "function_call", "content_filter").contains(aggFinish))
-                    return failedProtocolAttempt(out);
-                String finalContent = contentAcc.toString();
-                finalContent = PrivacyMasker.unmaskText(finalContent, maskSession);
-                // WorkBuddy's safety filter answers with one fixed sentence and
-                // finish_reason content_filter. Its plugin drops that sentence and keeps
-                // the finish, so the host can ask the group's next member instead of
-                // treating a refusal as an answer. Only the filter's own text is dropped.
-                if("content_filter".equals(aggFinish) && workbuddyFilterSaid(finalContent)) finalContent="";
-
-                JSONObject simulatedResp = new JSONObject();
-                simulatedResp.put("id", "chatcmpl-" + System.currentTimeMillis());
-                simulatedResp.put("object", "chat.completion");
-                simulatedResp.put("created", System.currentTimeMillis() / 1000);
-                simulatedResp.put("model", requestedModel);
-
-                JSONArray choices = new JSONArray();
-                JSONObject choice = new JSONObject();
-                choice.put("index", 0);
-                JSONObject msg = new JSONObject();
-                msg.put("role", "assistant");
-                msg.put("content", finalContent);
-                if (reasonAcc.length() > 0) msg.put("reasoning_content", reasonAcc.toString());
-                if (!toolAcc.isEmpty()) {
-                    JSONArray tcsOut = new JSONArray();
-                    for (JSONObject acc : toolAcc.values()) {
-                        acc.remove("index");
-                        tcsOut.put(acc);
-                    }
-                    msg.put("tool_calls", tcsOut);
-                }
-                choice.put("message", msg);
-                choice.put("finish_reason", aggFinish);
-                choices.put(choice);
-                simulatedResp.put("choices", choices);
-
-                if(aggUsage.length()>0) {
-                    if(!aggUsage.has("total_tokens") && aggUsage.opt("prompt_tokens") instanceof Number
-                            && aggUsage.opt("completion_tokens") instanceof Number) {
-                        long total=Math.max(0L,aggUsage.optLong("prompt_tokens",0))+Math.max(0L,aggUsage.optLong("completion_tokens",0));
-                        aggUsage.put("total_tokens",Math.min(Integer.MAX_VALUE,total));
-                    }
-                    simulatedResp.put("usage",aggUsage);
-                } else {
-                    JSONObject estimated=new JSONObject().put("prompt_tokens",10)
-                            .put("completion_tokens",finalContent.length()/2)
-                            .put("total_tokens",10+finalContent.length()/2).put("estimated",true);
-                    simulatedResp.put("usage",estimated);
-                    absorbUsage(U_ROW.get(),estimated); // Same explicitly estimated counters as the client.
-                }
-
-                // 这条聚合路径是独立拼装的，不走下面普通非流式那段，
-                // 所以响应侧的 think-tags / word-guard / model-map 别名都得在这里补一遍。
-                try {
-                    JSONObject mwAgg = configJson.optJSONObject("middleware");
-                    if (mwAgg != null) {
-                        JSONObject aggMsg = msg;
-                        String aggTxt = aggMsg.optString("content", "");
-                        String aggRsn = aggMsg.optString("reasoning_content", "");
-                        String[] aggFixed = Middleware.applyThinkTags(aggTxt, aggRsn, mwAgg);
-                        if (!aggFixed[0].equals(aggTxt) || !aggFixed[1].equals(aggRsn)) {
-                            aggMsg.put("content", aggFixed[0]);
-                            if (aggFixed[1].isEmpty()) aggMsg.remove("reasoning_content");
-                            else aggMsg.put("reasoning_content", aggFixed[1]);
-                        }
-                        if (Middleware.wordGuardEnabled(mwAgg)) {
-                            aggMsg.put("content", Middleware.maskWords(aggMsg.optString("content", ""), mwAgg));
-                        }
-                    }
-                    String aliasAgg = CLIENT_MODEL.get();
-                    if (aliasAgg != null && !aliasAgg.isEmpty()) simulatedResp.put("model", aliasAgg);
-                } catch (Throwable ignored) {
-                }
-
-                out.ok = true;
-                out.textOut = finalContent;
-                out.reasoningOut = reasonAcc.toString();
-                if (wantsAnthropicOut()) {
-                    // 这条聚合路径也要转格式，否则 /v1/messages 打到 WorkBuddy 会拿到 OpenAI 形状。
-                    // 必须用 responseToAnthropic 走完整互转（含 tool_calls），
-                    // 不能只拿 finalContent —— 那样会把工具调用丢掉。
-                    JSONObject anth = checkedAnthropicResponse(simulatedResp, requestedModel);
-                    Response resp = newFixedLengthResponse(Status.OK, "application/json; charset=UTF-8", anth.toString());
-                    addCorsHeaders(resp);
-                    applyGuardHeaders(resp, guardResult);
-                    out.response = resp;
-                    return out;
-                }
-                Response resp = newFixedLengthResponse(Status.OK, "application/json; charset=UTF-8", simulatedResp.toString());
-                resp.addHeader("X-Magpie-Served-By", out.modelRef == null ? target.providerId : out.modelRef);
-                addCorsHeaders(resp);
-                applyGuardHeaders(resp, guardResult);
-                out.response = resp;
-                return out;
+                return aggregateWorkBuddyChat(is, out, target.providerId, requestedModel, maskSession, guardResult);
             }
 
             if (clientWantsStream) {

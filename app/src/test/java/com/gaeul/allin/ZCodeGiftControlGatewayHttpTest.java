@@ -69,7 +69,10 @@ public final class ZCodeGiftControlGatewayHttpTest {
         final long[] now={1000}; Fixture fake=new Fixture();
         ZCodeGiftControl.setTestHooks(() -> now[0], fake);
         Gateway g=new Gateway(config()); g.start(NanoHTTPD.SOCKET_READ_TIMEOUT,true);
-        try {
+        try (ZCodeGiftDecimalUnitsHttpTest.Fixture gift = new ZCodeGiftDecimalUnitsHttpTest.Fixture("gift")) {
+            ZCodeGift.setFixtureBase("http://127.0.0.1:" + gift.getListeningPort());
+            gift.body = ZCodeGiftUsageHttpTest.json("full");
+            g.gateway.setVendorConnectionsForTests(url -> { throw new AssertionError("Gift inference must not use Plan"); });
             String panel="/api/zcode/gift";
             Reply first=request(g.getListeningPort(),panel,null);
             check(first.status==200 && first.body.optBoolean("ok") && first.body.optBoolean("complete") && fake.summaries.get()==1 && fake.observedJwt.equals("first"),"panel summary first account");
@@ -106,11 +109,13 @@ public final class ZCodeGiftControlGatewayHttpTest {
             now[0]+=47000; fake.mode="summary-fail"; ZCodeGiftControl.invalidate("first","d");
             String payload=new JSONObject().put("model","zcode/glm-5.3-flash").put("messages",new JSONArray().put(new JSONObject().put("role","user").put("content","hello"))).toString();
             Reply inference=request(g.getListeningPort(),"/v1/chat/completions",payload);
-            check(inference.status==502 && inference.body.toString().contains("计费"),"failed summary stops paid fallback");
+            check(inference.status==502 && inference.body.toString().contains("计费") && gift.calls.get()==0,
+                    "failed summary stops before sending inference");
             fake.mode="unknown"; ZCodeGiftControl.invalidate("first","d");
             inference=request(g.getListeningPort(),"/v1/chat/completions",payload);
-            check(inference.status==502,"unknown remaining stops paid fallback");
+            check(inference.status==200 && inference.body.has("choices") && gift.calls.get()==1,
+                    "known coverage routes to Gift: status=" + inference.status + " gift calls=" + gift.calls.get() + " body=" + inference.body);
             System.out.println("ZCodeGiftControlGatewayHttpTest PASS");
-        } finally { g.stop(); ZCodeGiftControl.setTestHooks(null,null); }
+        } finally { g.stop(); ZCodeGift.setFixtureBase(null); ZCodeGiftControl.setTestHooks(null,null); }
     }
 }
