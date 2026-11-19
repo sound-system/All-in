@@ -10,6 +10,7 @@ const button = html.match(/<button id="gw-toggle"[\s\S]*?<\/button>/)[0];
 const script = html.slice(html.indexOf('    let gatewayRunning'), html.indexOf('    // 通过自定义 scheme'));
 assert(script.includes('function animateGatewayState'));
 const fixture = `<!doctype html><html class="glass-ui"><head>${css}</head><body class="liquid-glass"><header class="glass-masthead">${button}</header><pre id="result">WAIT</pre><script>
+const systemReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 let reduced = false;
 window.matchMedia = () => ({matches:reduced});
 ${script}
@@ -21,7 +22,9 @@ try {
   const check = (condition, message) => { if (!condition) throw new Error(message); };
   window.__setGatewayState(false,3435);
   check(!toggle.getAnimations({subtree:true}).length && text.innerText === '网关已关闭', 'initial state must stay still');
-  check(getComputedStyle(toggle).transitionDuration === '0.65s', 'press release pacing');
+  const pressDuration = getComputedStyle(toggle).transitionDuration;
+  const expectedDuration = systemReduced ? '0s' : '0.65s';
+  check(pressDuration === expectedDuration, 'press release pacing: expected ' + expectedDuration + ', got ' + pressDuration);
   window.__setGatewayState(true,3435);
   const animations = toggle.getAnimations({subtree:true});
   check(animations.length === 3 && text.innerText === '网关运行中' && toggle.getAttribute('aria-label').includes('点击关闭'), 'running state feedback');
