@@ -14,6 +14,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 final class QoderCheckinRuntime {
     private static final String LIST = "/sash/api/v1/me/campaigns";
+    private static final String DAILY = "/sash/api/v1/me/daily-check-in/status";
     private static final String ACCOUNT = "fixture-qoder-account";
     private static final String CREDENTIAL = "fixture-qoder-device";
     private static final String PROBE = "/api/checkin/reconcile";
@@ -39,7 +40,8 @@ final class QoderCheckinRuntime {
 
     private HttpURLConnection vendor(String address) throws IOException {
         URL url = new URL(address);
-        check("openapi.qoder.com.cn".equals(url.getHost()), "fixed Qoder CN host");
+        check(("openapi.qoder.com.cn".equals(url.getHost()) && url.getPath().startsWith(LIST))
+                || ("gateway.qoder.com.cn".equals(url.getHost()) && DAILY.equals(url.getPath())), "fixed Qoder CN host and path");
         return new HttpURLConnection(url) {
             final ByteArrayOutputStream sent = new ByteArrayOutputStream();
             boolean counted;
@@ -56,7 +58,7 @@ final class QoderCheckinRuntime {
                         check(url.getPath().equals(LIST + "/" + campaign + "/claim") && "{}".equals(sent.toString("UTF-8")), "one exact campaign claim");
                         claims.incrementAndGet();
                     } else {
-                        check("GET".equals(getRequestMethod()) && LIST.equals(url.getPath()), "read-only activity listing");
+                        check("GET".equals(getRequestMethod()) && (LIST.equals(url.getPath()) || DAILY.equals(url.getPath())), "read-only activity or daily listing");
                         queries.incrementAndGet();
                     }
                 }
@@ -66,6 +68,7 @@ final class QoderCheckinRuntime {
             @Override public InputStream getInputStream() throws IOException {
                 JSONObject response = new JSONObject();
                 if ("POST".equals(getRequestMethod())) response.put("status", "CLAIMED");
+                else if (DAILY.equals(url.getPath())) response.put("status","DISABLED").put("rewardCredits",100);
                 else {
                     JSONArray rows = new JSONArray();
                     if (!empty) {
@@ -153,7 +156,7 @@ final class QoderCheckinRuntime {
             check(http(gateway,CLAIM,click,true).status==400&&claims.get()==0,"cannot claim before reading eligibility");
             check(http(gateway,"/api/checkin/run",query,true).status==400&&claims.get()==0,"legacy batch entry cannot claim Qoder");
             JSONObject found = row(http(gateway,PROBE,query,true));
-            check("inactive".equals(found.optString("outcome"))&&claims.get()==0,"expired activity not claimable");
+            check("daily_disabled".equals(found.optString("outcome"))&&"DISABLED".equals(found.optString("dailyStatus"))&&!found.has("credit")&&claims.get()==0,"expired activity checks independent daily status without inventing reward");
             campaign="today"; start=anchor; end=anchor+86400000L;
             found = row(http(gateway,PROBE,query,true));
             check("claimable".equals(found.optString("outcome"))&&"today".equals(found.optString("campaignId"))&&found.getBoolean("claimPossible"),"only current activity selectable");

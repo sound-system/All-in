@@ -11,10 +11,17 @@ final class GatewayAccessPolicy {
         path = canonical(path);
         return "/v1/chat/completions".equals(path) || "/v1/messages".equals(path)
                 || "/v1/responses".equals(path) || "/v1/models".equals(path)
-                || "/v1/images/generations".equals(path)
+                || "/v1/images/generations".equals(path) || miniMaxMedia(path)
                 || "/backend-api/codex/responses".equals(path)
                 || "/backend-api/codex/responses/compact".equals(path)
                 || "/backend-api/codex/models".equals(path);
+    }
+    static boolean miniMaxMedia(String path) {
+        return path != null && ("/v1/images/edits".equals(path) || "/v1/videos".equals(path)
+                || path.startsWith("/v1/videos/"));
+    }
+    static boolean mediaIngress(String path) {
+        return "/v1/images/generations".equals(path) || "/v1/images/edits".equals(path) || "/v1/videos".equals(path);
     }
     static boolean management(String path) { return path != null && ("/api".equals(path) || path.startsWith("/api/")) && !"/api/health".equals(path); }
     static boolean staticRoute(String path) {

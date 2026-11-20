@@ -11,9 +11,12 @@ vm.runInContext("Number.prototype.toLocaleString = function(){return String(this
 vm.runInContext(part('    // ==================== 用量看板', '    function moveNavPill('),context);
 vm.runInContext(part('    let authKeyVisible = false;', '    /** 一键复制：地址或密钥 */'),context);
 vm.runInContext(part('    function copyCredential(', '    /** 统一的复制实现'),context);
-vm.runInContext(part('    function startEditAuthKey()', '    async function loadStats()'),context);
+vm.runInContext(part('    function startEditAuthKey()', '    function clearGatewayEndpoints()'),context);
 vm.runInContext(part('    async function loadEtaCard()', '    function etaOpen()'),context);
-vm.runInContext(part('    async function loadStats()', '    /**\n     * 配置没变'),context);
+vm.runInContext(part('    function clearGatewayEndpoints()', '    /**\n     * 配置没变'),context);
+vm.runInContext(part('    let gatewayRunning', '    // ================= 用量与治理'),context);
+vm.runInContext(part('    function renderGatewayConnectionState()', '    const gatewayAccessAnimations'),context);
+const accessState=elements['access-running']={getAttribute(){return this.state},setAttribute(_,state){this.state=state}};
 context.copyText=s=>copied=s;context.showToast=()=>{};
 const response=x=>({ok:true,json:async()=>x});
 (async()=>{
@@ -47,6 +50,35 @@ const response=x=>({ok:true,json:async()=>x});
  let slowEta;context.fetch=()=>new Promise(r=>slowEta=r);const etaLate=context.loadEtaCard();
  context.fetch=async()=>response({ok:true,authKey:''});await context.loadAuthKey();slowEta(response({apiKey:'synthetic-old',recommendedModel:'fixture/model'}));await etaLate;
  assert.equal(elements['eta-key'].textContent,'(未设置)');copied='unchanged';assert.equal(context.etaCopyField('key'),false);assert.equal(copied,'unchanged');context.etaCopyAll();assert(copied.includes('API Key: \n'));assert(!copied.includes('synthetic-old'));
+ // A cold panel opened while the gateway is off must not report an unset key.
+ vm.runInContext("authKeyKnown=false; currentAuthKey=''",context);
+ context.window.__setGatewayState(false,3425);
+ assert.equal(accessState.state,'off');assert.equal(accessState.textContent,'网关已关闭');
+ context.fetch=async()=>({ok:false,status:503});await context.loadAuthKey();
+ assert.equal(elements['cred-api-key'].value,'');assert.match(elements['cred-key-state'].innerHTML,/口令状态暂不可用/);
+ context.fetch=async()=>response({ok:true});await context.loadAuthKey();
+ assert.match(elements['cred-key-state'].innerHTML,/口令状态暂不可用/);
+ // The normal toggle path re-reads the durable key as soon as the health probe succeeds.
+ let listening=false, keyReads=0;
+ context.nativeGatewayAvailable=()=>true;context.callNativeGateway=next=>{listening=next;return true};
+ context.loadConfig=()=>{};context.setTimeout=resolve=>resolve();
+ context.fetch=async url=>{
+   if (url.endsWith('/api/server-key')) {keyReads++; return response({ok:true,authKey:'synthetic-persisted'});}
+   return listening?response({port:3425,ip:'10.0.0.1'}):{ok:false,status:503};
+ };
+ await context.toggleGateway();await new Promise(setImmediate);
+ assert.equal(keyReads,1);assert.equal(elements['cred-api-key'].value,'synthetic-persisted');
+ assert.equal(accessState.state,'on');assert.match(accessState.textContent,/网关运行中/);
+ const fetchWhileRunning=context.fetch;let oldStatus;
+ context.fetch=()=>new Promise(resolve=>oldStatus=resolve);
+ const late=context.loadStats();context.fetch=fetchWhileRunning;
+ const stopping=context.toggleGateway();context.window.__setGatewayState(true,3425);
+ assert.equal(accessState.state,'off');assert.equal(elements['cred-base-url'].value,'');
+ oldStatus(response({port:3425,ip:'10.0.0.1'}));await late;await stopping;
+ assert.equal(accessState.state,'off');assert.equal(accessState.textContent,'网关已关闭');
+ assert.equal(elements['cred-api-key'].value,'synthetic-persisted');
+ context.fetch=async()=>{throw Error('offline')};await context.loadAuthKey();
+ assert.equal(elements['cred-api-key'].value,'synthetic-persisted');
  // The normal entry path invokes the shared refresh once, with no second sessions fetch.
  let sessionCalls=0;context.loadQuota=context.loadGuard=context.loadPermissions=context.loadMiddleware=()=>{};
  vm.runInContext(part('    function loadInsightAll()', '    /**\n     * 底部导航'),context);

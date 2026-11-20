@@ -163,7 +163,10 @@ public final class CatPawToolBridge {
             JSONObject part = parts.optJSONObject(i);
             if (part == null || !"text".equals(part.optString("type")) || !(part.opt("text") instanceof String))
                 throw new IllegalArgumentException("CatPaw supports text content only");
-            text.append(part.optString("text"));
+            String fragment = part.optString("text");
+            if (fragment.startsWith("data:image/"))
+                throw new IllegalArgumentException("CatPaw supports text content only");
+            text.append(fragment);
         }
         return text.toString();
     }
@@ -434,6 +437,19 @@ public final class CatPawToolBridge {
     }
 
     public static boolean required(Object value) { String mode = choice(value).mode; return "required".equals(mode) || "named".equals(mode); }
+
+    static boolean offersTools(JSONArray tools, Object value) {
+        return tools != null && tools.length() > 0 && !"none".equals(choice(value).mode);
+    }
+
+    static void unmaskArguments(JSONArray calls, PrivacyMasker.Session mask) throws Exception {
+        for (int i = 0; calls != null && i < calls.length(); i++) {
+            JSONObject function = calls.getJSONObject(i).getJSONObject("function");
+            JSONObject args = new JSONObject(function.getString("arguments"));
+            GatewayServer.unmaskJson(args, mask);
+            function.put("arguments", args.toString());
+        }
+    }
 
     private static String forcedRetryMessage(Choice choice) {
         StringBuilder message = new StringBuilder("Your previous reply did not include a valid tool call.\n");

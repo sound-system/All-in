@@ -28,11 +28,18 @@ public final class DeepSeekWeb {
         // Bound memory while retaining the upstream error body for the gateway to inspect.
         final int limit=1048576; ByteArrayOutputStream out=new ByteArrayOutputStream();
         byte[] buf=new byte[4096]; boolean truncated=false; int n;
-        if(response.body!=null) while((n=response.body.read(buf))!=-1) {
-            int take=Math.min(n,limit-out.size()); if(take>0)out.write(buf,0,take);
-            if(take<n){truncated=true;break;}
+        try {
+            if (response.body != null) while ((n = response.body.read(buf)) != -1) {
+                int take = Math.min(n, limit - out.size());
+                if (take > 0) out.write(buf, 0, take);
+                if (take < n) { truncated = true; break; }
+            }
+        } catch (IOException incompleteBody) {
+            // Keep the received status even if the error body cannot be read.
+            truncated = true;
         }
-        int code=response.status, mapped=(code==401||code==403)?401:(code==429?429:502);
+        int code = response.status;
+        int mapped = code == 401 || code == 403 || code == 429 ? code : 502;
         return new UpstreamException("DeepSeek "+operation+" HTTP "+code,code,mapped,
                 new String(out.toByteArray(),StandardCharsets.UTF_8),truncated);
     }

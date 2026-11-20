@@ -994,7 +994,7 @@ public class ZCodeAuth {
         // 列表接口的 data 是数组，走 fetchArray
         JSONArray arr;
         try {
-            arr = fetchArray("GET", keys, auth, null);
+            arr = fetchArray(keys, auth);
         } catch (Exception e) {
             throw new Exception(name + " API keys: " + e.getMessage());
         }
@@ -1034,41 +1034,78 @@ public class ZCodeAuth {
         return id + "." + secret;
     }
 
-    /** 列表接口的 data 是数组时，用这个方法取 */
-    private static JSONArray fetchArray(String method, String url, String auth, JSONObject body) throws Exception {
+    /** A failed list request must never look like an empty project key list. */
+    private static JSONArray fetchArray(String url, String auth) throws Exception {
         HttpURLConnection conn = NetworkPolicy.openHttp(url);
         try {
-        conn.setRequestMethod(method);
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(20000);
-        conn.setRequestProperty("Content-Type", "application/json");
-        conn.setRequestProperty("Accept", "application/json");
-        conn.setRequestProperty("User-Agent", UA);
-        if (auth != null && !auth.isEmpty()) conn.setRequestProperty("Authorization", auth);
-        int code = conn.getResponseCode();
-        InputStream is = (code >= 200 && code < 400) ? conn.getInputStream() : conn.getErrorStream();
-        if (conn.getContentLengthLong() > BoundedResponse.MAX_BYTES) throw new java.io.IOException("response body too large");
-        String text = readAll(is);
-        try {
-            JSONObject env = new JSONObject(text);
-            if (env.has("code")) {
-                String c = String.valueOf(env.opt("code"));
-                if (!"0".equals(c) && !"200".equals(c)) throw new Exception(env.optString("msg", "error " + c));
+            conn.setInstanceFollowRedirects(false);
+            conn.setRequestMethod("GET");
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(20000);
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("Accept", "application/json");
+            conn.setRequestProperty("User-Agent", UA);
+            if (auth != null && !auth.isEmpty()) conn.setRequestProperty("Authorization", auth);
+            int status = conn.getResponseCode();
+            if (status < 200 || status >= 300) throw new java.io.IOException("HTTP " + status);
+            if (conn.getContentLengthLong() > BoundedResponse.MAX_BYTES) {
+                throw new java.io.IOException("response body too large");
             }
-            return env.optJSONArray("data");
-        } catch (Exception e) {
-            if (e.getMessage() != null && e.getMessage().startsWith("error")) throw e;
-            try {
-                return new JSONArray(text);
-            } catch (Exception e2) {
-                return null;
-            }
+            return parsePersonalList(readAll(conn.getInputStream()));
+        } finally {
+            conn.disconnect();
         }
-        } finally { conn.disconnect(); }
+    }
+
+    static JSONArray parsePersonalList(String text) throws java.io.IOException {
+        com.gaeul.allin.json.JSONTokener parser = new com.gaeul.allin.json.JSONTokener(text);
+        Object value = parser.nextValue();
+        if (parser.nextClean() != 0) throw new java.io.IOException("unexpected data after list");
+        if (value instanceof JSONObject) {
+            JSONObject envelope = (JSONObject) value;
+            String code = envelope.optString("code");
+            if (envelope.has("code") && !"0".equals(code) && !"200".equals(code)) {
+                throw new java.io.IOException("ZCode list request failed");
+            }
+            value = envelope.opt("data");
+        }
+        if (!(value instanceof JSONArray)) throw new java.io.IOException("ZCode did not return a list");
+        return (JSONArray) value;
     }
 
     private static JSONObject postForData(String url, String auth, JSONObject body) throws Exception {
         return call("POST", url, auth, body, null, 20000);
+    }
+
+    /** ZCode 0.1.68 mintKey: first named default, otherwise first eligible personal project. */
+    static String[] personalProject(JSONObject info) {
+        JSONArray organizations = info == null ? null : info.optJSONArray("organizations");
+        if (organizations == null) return null;
+        String[] fallback = null;
+        for (int i = 0; i < organizations.length(); i++) {
+            JSONObject organization = organizations.optJSONObject(i);
+            if (organization == null) continue;
+            String org = organization.optString("organizationId", "");
+            JSONArray projects = organization.optJSONArray("projects");
+            if (org.isEmpty() || projects == null) continue;
+            String selected = "";
+            for (int j = 0; j < projects.length(); j++) {
+                JSONObject project = projects.optJSONObject(j);
+                if (project == null) continue;
+                String id = project.optString("projectId", "");
+                if (id.isEmpty() || "2".equals(project.optString("projectType", ""))) continue;
+                if (project.optString("projectName", "").contains("默认项目")) {
+                    selected = id;
+                    break;
+                }
+                if (selected.isEmpty()) selected = id;
+            }
+            if (selected.isEmpty()) continue;
+            String[] candidate = {org, selected};
+            if (organization.optString("organizationName", "").contains("默认机构")) return candidate;
+            if (fallback == null) fallback = candidate;
+        }
+        return fallback;
     }
 
     /** 账号默认机构/默认项目里建档，再读套餐名 */
@@ -1086,38 +1123,8 @@ public class ZCodeAuth {
             throw new Exception(name + " 账号: " + e.getMessage());
         }
 
-        // 选默认机构 / 默认项目（不含 team 项目 projectType=2）
-        String org = "";
-        String proj = "";
-        JSONArray organizations = info.optJSONArray("organizations");
-        if (organizations != null) {
-            for (int i = 0; i < organizations.length(); i++) {
-                JSONObject o = organizations.optJSONObject(i);
-                if (o == null) continue;
-                String oid = o.optString("organizationId", "");
-                JSONArray projects = o.optJSONArray("projects");
-                if (projects == null || oid.isEmpty()) continue;
-                String def = "";
-                int n = 0;
-                for (int j = 0; j < projects.length(); j++) {
-                    JSONObject p = projects.optJSONObject(j);
-                    if (p == null) continue;
-                    String pid = p.optString("projectId", "");
-                    if (pid.isEmpty() || "2".equals(String.valueOf(p.opt("projectType")))) continue;
-                    n++;
-                    if (def.isEmpty()) def = pid;
-                    if (p.optString("projectName", "").contains("默认项目")) def = pid;
-                }
-                if (n == 0 || def.isEmpty()) continue;
-                boolean named = o.optString("organizationName", "").contains("默认机构");
-                if (org.isEmpty() || named) {
-                    org = oid;
-                    proj = def;
-                    if (named) break;
-                }
-            }
-        }
-        if (org.isEmpty()) {
+        String[] project = personalProject(info);
+        if (project == null) {
             throw new Exception("这个 " + name + " 账号还没有可用于创建 API Key 的项目");
         }
 
@@ -1125,12 +1132,12 @@ public class ZCodeAuth {
         out.jwt = jwt;
         out.device = device;
         out.base = base;
-        String key = projectKey(site, keysUrl(apiRoot, org, proj), auth, null, "zcode-api-key");
+        String key = projectKey(site, keysUrl(apiRoot, project[0], project[1]), auth, null, "zcode-api-key");
         out.key = key;
 
         // 读套餐名（失败不影响登录）
         try {
-            JSONArray subs = fetchArray("GET", apiRoot + "/api/biz/subscription/list", key, null);
+            JSONArray subs = fetchArray(apiRoot + "/api/biz/subscription/list", key);
             if (subs != null) {
                 for (int i = 0; i < subs.length(); i++) {
                     JSONObject s = subs.optJSONObject(i);
@@ -1150,7 +1157,7 @@ public class ZCodeAuth {
     public static String planOf(String site, String key) {
         try {
             String apiRoot = "bigmodel".equals(site) ? BIGMODEL_API : ZAI_API;
-            JSONArray subs = fetchArray("GET", apiRoot + "/api/biz/subscription/list", key, null);
+            JSONArray subs = fetchArray(apiRoot + "/api/biz/subscription/list", key);
             if (subs != null) {
                 for (int i = 0; i < subs.length(); i++) {
                     JSONObject s = subs.optJSONObject(i);

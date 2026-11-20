@@ -6,13 +6,22 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Locale;
 
-/** Pinned community Antigravity 0.2.1 request contract; no credentials or automatic replay. */
+/** Antigravity request contract. */
 public final class AntigravityProtocol {
     private AntigravityProtocol() { }
     public static final String VERSION = "2.32.1";
+    // Newer manifests don't include the changelist. Use the latest known value, as upstream does.
     public static final String CHANGE_LIST = "1021296516";
 
     public static String userAgent() {
+        return userAgent(VERSION);
+    }
+
+    static String resolvedUserAgent() {
+        return userAgent(AntigravityVersion.resolve());
+    }
+
+    private static String userAgent(String version) {
         String os = System.getProperty("os.name", "linux").toLowerCase(Locale.ROOT);
         os = os.contains("windows") ? "windows" : os.contains("mac") || os.contains("darwin") ? "darwin" : "linux";
         String arch = System.getProperty("os.arch", "aarch64").toLowerCase(Locale.ROOT);
@@ -21,7 +30,7 @@ public final class AntigravityProtocol {
         else if (arch.startsWith("arm")) arch = "arm";
         else if (arch.equals("x86") || arch.matches("i[3-6]86")) arch = "386";
         else if (!arch.matches("[a-z0-9_]{1,24}")) arch = "unknown";
-        return "antigravity/hub/" + VERSION + " (aidev_client; os_type=" + os
+        return "antigravity/hub/" + version + " (aidev_client; os_type=" + os
                 + "; arch=" + arch + "; cl=" + CHANGE_LIST + ")";
     }
 

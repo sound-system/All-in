@@ -36,22 +36,54 @@ final class DeepSeekWebChat {
             Result r=new Result(); r.text=text.toString(); r.reasoning=turn.stream.reasoning.toString(); r.toolCalls=calls; return r;
         } finally { if (id!=null && !cancelled) try { client.deleteSession(id); } catch (IOException ignored) {} }
     }
-    static int safeStatus(DeepSeekWeb.UpstreamException e) {
-        int status=e.gatewayStatus;
-        return status==401 || status==429 ? status : 502;
-    }
     static String safeErrorMessage(int status) {
-        if(status==401) return "DeepSeek web authentication failed";
-        if(status==429) return "DeepSeek web rate limited";
+        if (status == 401) return "DeepSeek web authentication failed";
+        if (status == 403) return "DeepSeek web denied access. Check the account and model in the official web app.";
+        if (status == 429) return "DeepSeek web rate limited";
         return "DeepSeek web upstream failed";
     }
-    static String errorEvent(int status) {
+
+    private String safeBusinessCode(DeepSeekWeb.UpstreamException failure) {
+        if (failure.bodyTruncated || failure.responseBody.length() > 16 * 1024) return null;
         try {
-            String type=status==401?"authentication_error":status==429?"rate_limit_error":"upstream_error";
-            JSONObject detail=new JSONObject().put("type",type).put("code",status).put("message",safeErrorMessage(status));
-            return "data: "+new JSONObject().put("error",detail).toString()+"\n\n";
-        } catch(Exception impossible) { return "data: {\"error\":{\"type\":\"upstream_error\",\"code\":502}}\n\n"; }
+            JSONTokener reader = new JSONTokener(failure.responseBody);
+            Object raw = reader.nextValue();
+            if (!(raw instanceof JSONObject) || reader.nextClean() != 0) return null;
+            JSONObject root = (JSONObject) raw;
+            JSONObject value = root.optJSONObject("v");
+            for (JSONObject node : new JSONObject[]{root.optJSONObject("data"),
+                    value == null ? null : value.optJSONObject("data"), value,
+                    root.optJSONObject("error"), root}) {
+                if (node == null) continue;
+                for (String field : new String[]{"biz_code", "code"}) {
+                    String code = node.optString(field, "");
+                    if (code.matches("[1-9][0-9]{0,5}") && !code.equals(token)) return code;
+                }
+            }
+        } catch (JSONException ignored) {
+            // Ignore malformed and non-JSON bodies.
+        }
+        return null;
     }
+
+    JSONObject errorDetail(int status, DeepSeekWeb.UpstreamException failure) {
+        String type;
+        switch (status) {
+            case 401: type = "authentication_error"; break;
+            case 403: type = "permission_error"; break;
+            case 429: type = "rate_limit_error"; break;
+            default: type = "upstream_error";
+        }
+        JSONObject detail = new JSONObject().put("type", type).put("code", status)
+                .put("message", safeErrorMessage(status));
+        if (failure != null) {
+            if (failure.upstreamStatus > 0) detail.put("upstream_status", failure.upstreamStatus);
+            String businessCode = safeBusinessCode(failure);
+            if (businessCode != null) detail.put("upstream_business_code", businessCode);
+        }
+        return detail;
+    }
+
     static String chunk(String model,String field,String value,boolean finish) throws IOException {
         try {
             JSONObject delta=new JSONObject(); if(field!=null) delta.put(field,value);
@@ -90,9 +122,11 @@ final class DeepSeekWebChat {
                 if(cancelled) throw new IOException("Cancelled");
                 output.write((result.toolCalls.length()>0 ? finishToolChunk(model)+"data: [DONE]\n\n" : chunk(model,null,null,true)+"data: [DONE]\n\n").getBytes(StandardCharsets.UTF_8)); output.flush(); success=true;
             } catch(Exception e) {
-                if(e instanceof DeepSeekWeb.UpstreamException) status=safeStatus((DeepSeekWeb.UpstreamException)e);
+                DeepSeekWeb.UpstreamException failure = e instanceof DeepSeekWeb.UpstreamException
+                        ? (DeepSeekWeb.UpstreamException) e : null;
+                if (failure != null) status = failure.gatewayStatus;
                 error=cancelled?"Client cancelled":safeErrorMessage(status);
-                if(!cancelled) try {output.write(errorEvent(status).getBytes(StandardCharsets.UTF_8)); output.flush();} catch(IOException ignored) {}
+                if(!cancelled) try {output.write(("data: " + new JSONObject().put("error", errorDetail(status, failure)) + "\n\n").getBytes(StandardCharsets.UTF_8)); output.flush();} catch(IOException ignored) {}
             } finally { try {output.close();} catch(IOException ignored) {} completion.done(success,success?200:status,error); }
           }
         },"deepseek-web-stream");

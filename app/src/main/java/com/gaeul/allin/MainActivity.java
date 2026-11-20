@@ -280,11 +280,9 @@ public class MainActivity extends Activity {
                     @Override
                     public void run() {
                         pushGatewayStateToWeb();
-                        view.loadUrl("javascript:(function(){"
-                                + "if(typeof applyGatewayUI==='function')applyGatewayUI(true,3425);"
-                                + "if(typeof loadStats==='function')loadStats();"
-                                + "if(typeof loadConfig==='function')loadConfig();"
-                                + "})();");
+                        if (GatewayService.isRunning()) {
+                            view.loadUrl("javascript:if(typeof refreshGatewayPanel==='function'){refreshGatewayPanel();}");
+                        }
                     }
                 }, 400);
             }

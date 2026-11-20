@@ -87,7 +87,7 @@ public class CodexAuth {
     };
 
     public static HttpURLConnection openHttp(String urlStr) throws Exception {
-        return NetworkPolicy.openHttp(urlStr);
+        return CodexHttp1Connection.open(urlStr);
     }
 
     /**

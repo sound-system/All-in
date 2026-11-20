@@ -9,7 +9,32 @@ import fi.iki.elonen.NanoHTTPD;
 
 public final class LoomyInferenceGatewayHttpTest {
  static void check(boolean b,String s){if(!b)throw new AssertionError(s);}
+ static void refusal(int upstream, String media, String code, String expectedCode, int expected) throws Exception {
+  JSONObject p=VendorPolicyGatewayHttpTest.provider("loomy","openai","https://loomyad.xunfei.cn/api/v1","spark-x2.6");
+  p.put("accounts",new JSONArray().put(new JSONObject().put("id","a").put("token","fixture-session").put("enabled",true)));
+  String fixture=code.isEmpty()?"edge refuser":new JSONObject().put("code",code).put("desc","DO-NOT-ECHO fixture-session").toString();
+  try(VendorPolicyGatewayHttpTest.Upstream up=new VendorPolicyGatewayHttpTest.Upstream((r,n)->new VendorPolicyGatewayHttpTest.Reply(upstream,media,fixture));
+      VendorPolicyGatewayHttpTest.Gateway g=new VendorPolicyGatewayHttpTest.Gateway(VendorPolicyGatewayHttpTest.config(p),up,false)) {
+   for(boolean stream:new boolean[]{false,true}) {
+    VendorPolicyGatewayHttpTest.Result result=VendorPolicyGatewayHttpTest.post(g,"/v1/chat/completions",VendorPolicyGatewayHttpTest.body("loomy/spark-x2.6",stream));
+    check(result.status==expected,"Loomy refusal HTTP status "+upstream+"/"+expected+"/"+result.status);
+    JSONObject detail=new JSONObject(result.body).getJSONObject("error");
+    check(detail.optInt("upstream_status")==upstream,"vendor HTTP status preserved");
+    check(expectedCode.equals(detail.optString("upstream_business_code")),"business code preserved");
+    check((expected==401?"authentication_error":"upstream_error").equals(detail.optString("type")),"accurate authentication classification");
+    check(!result.body.contains("fixture-session")&&!result.body.contains("DO-NOT-ECHO"),"raw refusal and session excluded");
+   }
+   check(up.requests.size()==2,"one upstream request per case");
+  }
+ }
+
  public static void main(String[] args)throws Exception {
+  refusal(200,"application/json; charset=UTF-8","020002","020002",401);
+  refusal(200,"application/json","100002","100002",401);
+  refusal(403,"application/json","100002","100002",401);
+  refusal(401,"text/html","","",502);
+  refusal(403,"text/html","","",502);
+  refusal(200,"application/json","130099","130099",502);
   AtomicInteger calls=new AtomicInteger(); final JSONObject[] captured={null}; final String[] path={null},token={null},auth={null},content={null},accept={null};
   HttpServer up=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
   up.createContext("/",x->{try{calls.incrementAndGet();path[0]=x.getRequestURI().getPath();token[0]=x.getRequestHeaders().getFirst("token");auth[0]=x.getRequestHeaders().getFirst("Authorization");content[0]=x.getRequestHeaders().getFirst("Content-Type");accept[0]=x.getRequestHeaders().getFirst("Accept");captured[0]=new JSONObject(new String(x.getRequestBody().readAllBytes(),StandardCharsets.UTF_8));byte[] b="{\"id\":\"x\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}".getBytes(StandardCharsets.UTF_8);x.sendResponseHeaders(200,b.length);x.getResponseBody().write(b);}finally{x.close();}});up.start();

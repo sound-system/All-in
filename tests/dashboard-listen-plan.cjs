@@ -28,7 +28,7 @@ function page() {
   const context = {
     console, URL, API_BASE: '', gatewayRunning: true, gatewayPort: 3425,
     document, window: {}, sessionStorage: { getItem() { return ''; }, setItem() {} },
-    AUTH_KEY: '', fetch: null, statsFailures: 0,
+    AUTH_KEY: '', fetch: null, statsFailures: 0, gatewayTogglePending: false,
     applyGatewayUI() {}, setTimeout() {}, clearTimeout() {},
     renderEtaBase() {}, checkSetup() {},
     showToast: message => toasts.push(String(message)),
@@ -36,7 +36,7 @@ function page() {
   };
   vm.createContext(context);
   vm.runInContext(part('    let authKeyVisible = false;', '    /** 一键复制：地址或密钥 */'), context);
-  vm.runInContext(part('    async function loadStats() {', '    /**\n     * 配置没变'), context);
+  vm.runInContext(part('    function clearGatewayEndpoints() {', '    /**\n     * 配置没变'), context);
   vm.runInContext(part('    function copyManagementPanelLink(button) {', '    /** 统一的复制实现'), context);
   return { c: context, nodes, toasts, copied };
 }
@@ -256,6 +256,7 @@ const watch = node => {
   p.c.window.AllInNative = { copyManagementPanelLink: () => false };
   p.c.fetch = async () => response(status(LOOPBACK_STATUS));
   await p.c.loadStats();
+  vm.runInContext('authKeyKnown=true; renderCredentials()', p.c);
   let keyState = p.nodes['cred-key-state'].innerHTML;
   assert(keyState.includes('未设口令'), keyState);
   assert(!keyState.includes('局域网内任何人可用'), 'loopback listener is not reachable from the LAN: ' + keyState);
@@ -279,7 +280,7 @@ const watch = node => {
   // 正例 2：回环 + 有口令 → 仍是「已启用鉴权」，不因回环改写口令状态。
   p = page();
   p.c.fetch = async () => response(status(LOOPBACK_STATUS));
-  vm.runInContext("currentAuthKey='mp-synthetic'", p.c);
+  vm.runInContext("authKeyKnown=true; currentAuthKey='mp-synthetic'", p.c);
   await p.c.loadStats();
   p.c.renderCredentials();
   assert(p.nodes['cred-key-state'].innerHTML.includes('已启用鉴权'), p.nodes['cred-key-state'].innerHTML);
@@ -291,6 +292,7 @@ const watch = node => {
     configuredLoopbackOnly: false, configuredPort: 3425, configuredPortApplied: true,
     listenActionRequired: true, listenAction: 'enable-loopback'
   }));
+  vm.runInContext('authKeyKnown=true', p.c);
   await p.c.loadStats();
   assert(p.nodes['cred-key-state'].innerHTML.includes('当前只监听本机'), p.nodes['cred-key-state'].innerHTML);
   assert(!p.nodes['cred-key-state'].innerHTML.includes('局域网内任何人可用'));
@@ -298,6 +300,7 @@ const watch = node => {
   // 反例 1：通配监听 + 未设口令 → 保留原有告警文案，不被回环分支误伤。
   p = page();
   p.c.fetch = async () => response(status(WILDCARD_STATUS));
+  vm.runInContext('authKeyKnown=true', p.c);
   await p.c.loadStats();
   keyState = p.nodes['cred-key-state'].innerHTML;
   assert(keyState.includes('未设口令（局域网内任何人可用）'), keyState);
@@ -328,6 +331,7 @@ const watch = node => {
   // 反例 4：状态读取失败 → 不保留回环结论，回到中性文案，且不报错。
   p = page();
   p.c.fetch = async () => response(status(LOOPBACK_STATUS));
+  vm.runInContext('authKeyKnown=true', p.c);
   await p.c.loadStats();
   p.c.fetch = async () => { throw Error('offline'); };
   await p.c.loadStats();

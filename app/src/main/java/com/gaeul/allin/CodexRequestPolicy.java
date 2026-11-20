@@ -175,7 +175,42 @@ public final class CodexRequestPolicy {
         if (!body.has("text")) body.put("text", new JSONObject().put("verbosity", "medium"));
         normalizeReasoning(body);
         normalizeStringInput(body);
+        normalizeFunctionStrict(body);
         return new Prepared(body, constraints, effectiveLimit, unattributed);
+    }
+
+    /**
+     * Codex CLI explicitly says strict=false for ordinary function tools. Mirror
+     * that default only: an explicit true/false and its schema remain untouched.
+     * Never approximate oneOf with anyOf or silently weaken strict=true.
+     */
+    private static void normalizeFunctionStrict(JSONObject body) {
+        normalizeFunctionStrict(body.optJSONArray("tools"), 0);
+        JSONArray input = body.optJSONArray("input");
+        for (int i = 0; input != null && i < input.length(); i++) {
+            JSONObject item = input.optJSONObject(i);
+            if (item == null) continue;
+            String type = item.optString("type", "");
+            if ("additional_tools".equals(type) || "tool_search_output".equals(type))
+                normalizeFunctionStrict(item.optJSONArray("tools"), 0);
+        }
+    }
+
+    private static void normalizeFunctionStrict(JSONArray tools, int depth) {
+        if (tools == null) return;
+        if (depth > 64) throw new IllegalArgumentException("Codex tool namespace nesting is too deep");
+        for (int i = 0; i < tools.length(); i++) {
+            JSONObject tool = tools.optJSONObject(i);
+            if (tool == null) continue;
+            String type = tool.optString("type", "");
+            if ("namespace".equals(type)) {
+                normalizeFunctionStrict(tool.optJSONArray("tools"), depth + 1);
+            } else if ("function".equals(type)) {
+                if (!tool.has("strict")) tool.put("strict", false);
+                else if (!(tool.opt("strict") instanceof Boolean))
+                    throw new IllegalArgumentException("Codex function tool strict must be a boolean");
+            }
+        }
     }
 
     /**

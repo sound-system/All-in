@@ -841,6 +841,10 @@ public class AntigravityAuth {
         Dispatch outcome = new Dispatch();
         if (bases == null || bases.length == 0) return outcome;
         final Cancellation cancellation = cancel == null ? Cancellation.NONE : cancel;
+        String userAgent = USER_AGENT;
+        if (!cancellation.isCancelled() && transport == SOCKET_TRANSPORT) {
+            userAgent = AntigravityProtocol.resolvedUserAgent();
+        }
         for (int i = 0; i < bases.length; i++) {
             if (cancellation.isCancelled()) {
                 outcome.cancelled = true;
@@ -851,7 +855,7 @@ public class AntigravityAuth {
             try {
                 String url = base.replaceAll("/+$", "") + (pathSuffix == null ? "" : pathSuffix);
                 outcome.resp = request(url, "POST", bearer, null, "application/json",
-                        body, connectMs, readMs, transport, cancellation, outcome.openCount);
+                        body, connectMs, readMs, transport, cancellation, outcome.openCount, userAgent);
                 outcome.usedBase = base;
                 outcome.sendCount++;
                 return outcome;
@@ -1830,14 +1834,13 @@ public class AntigravityAuth {
         JSONObject body = new JSONObject();
         body.put("metadata", meta);
         if (project != null && !project.isEmpty()) body.put("cloudaicompanionProject", project);
+        String userAgent = AntigravityProtocol.resolvedUserAgent();
         // prod 优先（upstream 的 loadBase），本机网络不通时回落到 daily
         try {
-            return postJson(loadBase + "/v1internal:loadCodeAssist", access, body,
-                    USER_AGENT);
+            return postJson(loadBase + "/v1internal:loadCodeAssist", access, body, userAgent);
         } catch (Exception e) {
             if (codeAssistStatus(e) != 0) throw e; // Explicit HTTP refusal is not a transport fallback.
-            return postJson(chatBase + "/v1internal:loadCodeAssist", access, body,
-                    USER_AGENT);
+            return postJson(chatBase + "/v1internal:loadCodeAssist", access, body, userAgent);
         }
     }
 
@@ -1873,7 +1876,7 @@ public class AntigravityAuth {
 
     private static String onboard(String access, JSONObject load) throws Exception {
         JSONObject body = AntigravityProtocol.onboardBody(load);
-        String ua = USER_AGENT;
+        String ua = AntigravityProtocol.resolvedUserAgent();
         for (int i = 0; i < 5; i++) {
             JSONObject lro = postJson(chatBase + "/v1internal:onboardUser", access, body, ua);
             if (lro.optBoolean("done", false)) {
@@ -1934,14 +1937,16 @@ public class AntigravityAuth {
         JSONObject post(String url, String access, JSONObject body) throws Exception;
     }
 
-    private static final ModelsPost POST_MODELS = (url, access, body) -> postJson(url, access, body, USER_AGENT);
-
     public static JSONArray fetchModels(JSONObject acc, String access, String project) throws Exception {
         return fetchModels(acc, access, project, null);
     }
 
     static JSONArray fetchModels(JSONObject acc, String access, String project, ModelsPost post) throws Exception {
-        ModelsPost seam = post == null ? POST_MODELS : post;
+        ModelsPost seam = post;
+        if (seam == null) {
+            String userAgent = AntigravityProtocol.resolvedUserAgent();
+            seam = (url, token, payload) -> postJson(url, token, payload, userAgent);
+        }
         JSONObject body = new JSONObject();
         body.put("project", project);
         String paid = acc.optString("paidTier", "");

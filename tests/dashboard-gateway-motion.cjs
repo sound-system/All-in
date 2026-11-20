@@ -13,6 +13,9 @@ const fixture = `<!doctype html><html class="glass-ui"><head>${css}</head><body 
 const systemReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 let reduced = false;
 window.matchMedia = () => ({matches:reduced});
+let statusRevision = 0;
+function clearGatewayEndpoints() {}
+function renderGatewayConnectionState() {}
 ${script}
 try {
   const toggle = document.getElementById('gw-toggle');

@@ -12,9 +12,9 @@ public final class ZCodeBoundaryGatewayHttpTest {
     static void check(boolean ok, String msg) { if (!ok) throw new AssertionError(msg); }
     static final class Reply { int status; String body; }
     static Reply post(int port, String path, boolean stream) throws Exception {
-        JSONObject b = new JSONObject().put("model", ZCodeGiftUsageHttpTest.MODEL).put("stream", stream).put("max_tokens", 64);
-        if (path.endsWith("/responses")) b.put("input", "hello");
-        else b.put("messages", new JSONArray().put(new JSONObject().put("role", "user").put("content", "hello")));
+        JSONObject b = new JSONObject().put("model", ZCodeGiftUsageHttpTest.MODEL).put("stream", stream);
+        if (path.endsWith("/responses")) b.put("input", "hello").put("max_output_tokens", 64);
+        else b.put("max_tokens", 64).put("messages", new JSONArray().put(new JSONObject().put("role", "user").put("content", "hello")));
         HttpURLConnection c = (HttpURLConnection)new URL("http://127.0.0.1:" + port + path).openConnection();
         c.setConnectTimeout(5000); c.setReadTimeout(15000); c.setRequestMethod("POST"); c.setDoOutput(true);
         c.setRequestProperty("Authorization", "Bearer fixture-gateway"); c.setRequestProperty("Content-Type", "application/json");
@@ -91,12 +91,249 @@ public final class ZCodeBoundaryGatewayHttpTest {
         System.out.println("ZCode plan gate PASS: confirmed, absent and unavailable subscriptions");
     }
 
+    static JSONObject project(String id, String name, Object type) {
+        return new JSONObject().put("projectId", id).put("projectName", name).put("projectType", type);
+    }
+
+    static JSONObject org(String id, String name, JSONObject... projects) {
+        JSONArray list = new JSONArray();
+        for (JSONObject project : projects) list.put(project);
+        return new JSONObject().put("organizationId", id).put("organizationName", name).put("projects", list);
+    }
+
+    static void personalProjectAndList() throws Exception {
+        JSONObject ordinary = org("ordinary", "other", project("first", "alternate", 1), project("second", "other", 1));
+        JSONObject personal = org("personal", "默认机构", project("team", "默认项目", 2),
+                project("alt", "alternate", 1), project("own", "默认项目一", 1), project("other-own", "默认项目二", 1));
+        JSONObject teamOnly = org("team-only", "默认机构", project("seat", "默认项目", "2"));
+        JSONObject input = new JSONObject().put("organizations", new JSONArray().put(ordinary).put(teamOnly).put(personal));
+        check(Arrays.equals(ZCodeAuth.personalProject(input), new String[]{"personal", "own"}), "first personal default wins");
+        input.put("organizations", new JSONArray().put(teamOnly).put(ordinary));
+        check(Arrays.equals(ZCodeAuth.personalProject(input), new String[]{"ordinary", "first"}), "first eligible personal fallback");
+        input.put("organizations", new JSONArray().put(teamOnly));
+        check(ZCodeAuth.personalProject(input) == null, "team-only is not eligible for personal sign-in");
+        check(ZCodeAuth.parsePersonalList("[]").length() == 0, "bare list");
+        check(ZCodeAuth.parsePersonalList("{\"code\":0,\"data\":[]}").length() == 0, "success envelope");
+        for (String bad : new String[]{"{\"code\":403,\"msg\":\"permission denied\",\"data\":[]}", "{}", "[] []"}) {
+            try {
+                ZCodeAuth.parsePersonalList(bad);
+                throw new AssertionError("failed or incomplete key listing accepted");
+            } catch (IOException expected) { }
+        }
+        System.out.println("ZCode personal project/list PASS (8 checks)");
+    }
+
+    static void checkNoPlanUntilConfirmedActive() throws Exception {
+        java.util.concurrent.atomic.AtomicLong now = new java.util.concurrent.atomic.AtomicLong(1);
+        String[] responses = {"{\"data\":[]}", "{\"code\":503,\"data\":[]}", "{\"data\":[{\"status\":\"VALID\"}]}", "{\"data\":null}"};
+        try (VendorPolicyGatewayHttpTest.Upstream upstream = new VendorPolicyGatewayHttpTest.Upstream((request, index) -> {
+            check(request.path.equals("/api/biz/subscription/list"), "personal entitlement endpoint");
+            check("fixture-plan-key".equals(request.headers.get("Authorization")), "personal entitlement uses selected key");
+            return new VendorPolicyGatewayHttpTest.Reply(200, "application/json", responses[index - 1]);
+        })) {
+            ZCodePlanGate gate = new ZCodePlanGate(now::get);
+            GatewayServer.VendorConnectionFactory loopback = url -> NetworkPolicy.openHttp(
+                    "http://127.0.0.1:" + upstream.server.getLocalPort() + new URL(url).getPath());
+            ZCodePlanGate.State[] expected = {ZCodePlanGate.State.NO_PLAN, ZCodePlanGate.State.NO_PLAN,
+                    ZCodePlanGate.State.ACTIVE, ZCodePlanGate.State.UNKNOWN};
+            for (ZCodePlanGate.State state : expected) {
+                check(gate.state("fixture-account", "bigmodel", "fixture-plan-key", loopback) == state,
+                        "unexpected personal entitlement state, expected " + state);
+                now.addAndGet(61_000_000_000L);
+            }
+            check(upstream.requests.size() == expected.length, "one real loopback metadata read per expired entry");
+        }
+        System.out.println("ZCode personal plan transitions PASS (4 reads)");
+    }
+
+    static void personalToolRoundTrip(boolean longCase) throws Exception {
+        int toolCount = longCase ? 35 : 1;
+        String argument = longCase ? String.join("", Collections.nCopies(256, "行|quote=\"|slash=\\\n")) : "short";
+        String toolResult = "result|" + argument + "|end";
+        JSONObject params = new JSONObject().put("value", argument);
+        JSONObject toolCall = new JSONObject().put("index", 0).put("id", "fixture-personal-call").put("type", "function")
+                .put("function", new JSONObject().put("name", "fixture_tool_0").put("arguments", params.toString()));
+        JSONObject first = new JSONObject(VendorPolicyGatewayHttpTest.CHAT);
+        JSONObject choice = first.getJSONArray("choices").getJSONObject(0);
+        choice.put("finish_reason", "tool_calls");
+        choice.getJSONObject("message").put("content", JSONObject.NULL).put("tool_calls", new JSONArray().put(toolCall));
+        java.util.concurrent.atomic.AtomicInteger sends = new java.util.concurrent.atomic.AtomicInteger();
+        try (VendorPolicyGatewayHttpTest.Upstream upstream = new VendorPolicyGatewayHttpTest.Upstream((request, index) -> {
+            if (request.path.endsWith("/api/biz/subscription/list")) {
+                return new VendorPolicyGatewayHttpTest.Reply(200, "application/json", "{\"data\":[{\"status\":\"VALID\"}]}");
+            }
+            int round = sends.incrementAndGet();
+            check(request.path.endsWith("/chat/completions"), "personal plan Chat endpoint");
+            check("Bearer fixture-key".equals(request.headers.get("Authorization")), "personal plan uses selected key");
+            check(request.body.getJSONArray("tools").length() == toolCount, "all tool definitions delivered");
+            if (round == 2) {
+                JSONArray history = request.body.getJSONArray("messages");
+                JSONObject assistant = history.getJSONObject(history.length() - 2);
+                JSONObject result = history.getJSONObject(history.length() - 1);
+                JSONObject passedCall = assistant.getJSONArray("tool_calls").getJSONObject(0);
+                check("fixture-personal-call".equals(passedCall.getString("id")), "tool call id round-trips");
+                check("fixture_tool_0".equals(passedCall.getJSONObject("function").getString("name")), "tool name round-trips");
+                check(argument.equals(new JSONObject(passedCall.getJSONObject("function").getString("arguments")).getString("value")), "tool argument round-trips");
+                check("fixture-personal-call".equals(result.getString("tool_call_id")), "tool result id round-trips");
+                check(toolResult.equals(result.getString("content")), "tool result round-trips");
+            }
+            return new VendorPolicyGatewayHttpTest.Reply(200, "application/json", round == 1 ? first.toString() : VendorPolicyGatewayHttpTest.CHAT);
+        })) {
+            JSONObject cfg = ZCodeGiftUsageHttpTest.config(upstream.server.getLocalPort());
+            cfg.getJSONObject("server").put("authKey", "fixture-auth");
+            cfg.getJSONArray("providers").getJSONObject(0).getJSONArray("accounts").getJSONObject(0)
+                    .put("id", "fixture-personal").put("token", "fixture-key").put("site", "bigmodel");
+            try (VendorPolicyGatewayHttpTest.Gateway gateway = new VendorPolicyGatewayHttpTest.Gateway(cfg, upstream, false)) {
+                ZCodeGiftBusyGatewayHttpTest.Transport gift = new ZCodeGiftBusyGatewayHttpTest.Transport();
+                gift.allowed = false;
+                gateway.gateway.setGiftTransportForTest(gift);
+                JSONArray tools = new JSONArray();
+                for (int i = 0; i < toolCount; i++) {
+                    JSONObject schema = new JSONObject().put("type", "object").put("properties",
+                            new JSONObject().put("value", new JSONObject().put("type", "string")));
+                    tools.put(new JSONObject().put("type", "function").put("function",
+                            new JSONObject().put("name", "fixture_tool_" + i).put("parameters", schema)));
+                }
+                JSONObject request = VendorPolicyGatewayHttpTest.body(ZCodeGiftUsageHttpTest.MODEL, false).put("tools", tools);
+                String path = "/v1/chat/completions";
+                VendorPolicyGatewayHttpTest.Result reply = VendorPolicyGatewayHttpTest.post(gateway, path, request);
+                check(reply.status == 200, "first tool turn succeeds: " + reply.status);
+                JSONObject responseChoice = new JSONObject(reply.body).getJSONArray("choices").getJSONObject(0);
+                check("tool_calls".equals(responseChoice.getString("finish_reason")), "first turn terminal reason");
+                JSONObject assistant = responseChoice.getJSONObject("message");
+                JSONObject received = assistant.getJSONArray("tool_calls").getJSONObject(0);
+                check(argument.equals(new JSONObject(received.getJSONObject("function").getString("arguments")).getString("value")), "client receives complete tool argument");
+                request.getJSONArray("messages").put(assistant).put(new JSONObject().put("role", "tool")
+                        .put("tool_call_id", received.getString("id")).put("content", toolResult));
+                VendorPolicyGatewayHttpTest.Result finalReply = VendorPolicyGatewayHttpTest.post(gateway, path, request);
+                check(finalReply.status == 200, "second tool turn succeeds: " + finalReply.status);
+                JSONObject finalChoice = new JSONObject(finalReply.body).getJSONArray("choices").getJSONObject(0);
+                check("stop".equals(finalChoice.getString("finish_reason")) && "ok".equals(finalChoice.getJSONObject("message").getString("content")), "final answer and terminal reason");
+                check(sends.get() == 2 && upstream.requests.size() == 3 && gift.opens.get() == 0,
+                        "one plan read, two paid loopback requests and zero Gift sends");
+            }
+        }
+        System.out.println("ZCode personal tool round trip PASS (" + toolCount + " tools, "
+                + argument.getBytes(StandardCharsets.UTF_8).length + " argument bytes)");
+    }
+
+    static JSONObject responsesBody(boolean stream) {
+        return new JSONObject().put("model", ZCodeGiftUsageHttpTest.MODEL).put("stream", stream)
+                .put("input", "hello").put("max_output_tokens", 4096)
+                .put("reasoning", new JSONObject().put("effort", "low"));
+    }
+
+    static JSONObject completed(String wire, boolean stream) {
+        if (!stream) return new JSONObject(wire);
+        for (String line : wire.split("\n")) {
+            if (!line.startsWith("data: ")) continue;
+            JSONObject event = new JSONObject(line.substring(6));
+            if ("response.completed".equals(event.optString("type"))) return event.getJSONObject("response");
+        }
+        throw new AssertionError("missing response.completed");
+    }
+
+    static void giftResponsesToolRoundTrip(boolean stream, int count) throws Exception {
+        String model = ZCodeGiftUsageHttpTest.MODEL;
+        String arg = count == 1 ? "short" : String.join("", Collections.nCopies(256, "行|quote=\"|slash=\\n"));
+        String result = "result|" + arg + "|end";
+        JSONObject input = new JSONObject().put("value", arg);
+        JSONObject block = new JSONObject().put("type", "tool_use").put("id", "gift-call")
+                .put("name", "fixture_0").put("input", input);
+        String toolJson = new JSONObject(ZCodeGiftUsageHttpTest.json("full"))
+                .put("stop_reason", "tool_use").put("content", new JSONArray().put(block)).toString();
+        String toolStream = ZCodeGiftUsageHttpTest.stream("full", false).split("event: content_block_start", 2)[0]
+                + ZCodeGiftUsageHttpTest.event("content_block_start", ",\"index\":0,\"content_block\":" + new JSONObject(block.toString()).put("input", new JSONObject()))
+                + ZCodeGiftUsageHttpTest.event("content_block_delta", ",\"index\":0,\"delta\":" + new JSONObject().put("type", "input_json_delta").put("partial_json", input.toString()))
+                + ZCodeGiftUsageHttpTest.event("content_block_stop", ",\"index\":0")
+                + ZCodeGiftUsageHttpTest.event("message_delta", ",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":7}")
+                + ZCodeGiftUsageHttpTest.event("message_stop", "");
+        try (VendorPolicyGatewayHttpTest.Upstream up = new VendorPolicyGatewayHttpTest.Upstream((request, round) -> {
+            check(request.path.contains("/messages"), "Gift upstream uses its native Messages endpoint");
+            check(request.body.getJSONArray("tools").length() == count, "declared tools reach Gift");
+            if (round == 2) {
+                JSONArray messages = request.body.getJSONArray("messages");
+                JSONObject returned = messages.getJSONObject(messages.length()-1).getJSONArray("content").getJSONObject(0);
+                check("tool_result".equals(returned.optString("type")) && "gift-call".equals(returned.optString("tool_use_id")), "result keeps call identity");
+                check(result.equals(returned.optString("content")), "result arrives unchanged");
+            }
+            return new VendorPolicyGatewayHttpTest.Reply(200, stream ? "text/event-stream" : "application/json",
+                    round == 1 ? (stream ? toolStream : toolJson) : (stream ? ZCodeGiftUsageHttpTest.stream("full", true) : ZCodeGiftUsageHttpTest.json("full")));
+        })) {
+            ZCodeGift.setFixtureBase("http://127.0.0.1:" + up.server.getLocalPort());
+            ZCodeGiftBusyGatewayHttpTest.Transport gift = new ZCodeGiftBusyGatewayHttpTest.Transport();
+            JSONObject cfg = ZCodeGiftUsageHttpTest.config(up.server.getLocalPort());
+            cfg.getJSONObject("server").put("authKey", "fixture-auth");
+            try (VendorPolicyGatewayHttpTest.Gateway g = new VendorPolicyGatewayHttpTest.Gateway(cfg, up, false)) {
+                g.gateway.setGiftTransportForTest(gift);
+                g.gateway.setVendorConnectionsForTests(url -> { throw new AssertionError("Gift must not call paid transport"); });
+                JSONArray tools = new JSONArray();
+                for (int j = 0; j < count; j++) tools.put(new JSONObject().put("type", "function").put("name", "fixture_"+j)
+                        .put("parameters", new JSONObject().put("type", "object").put("properties", new JSONObject().put("value", new JSONObject().put("type", "string")))));
+                JSONObject body = responsesBody(stream).put("tools", tools);
+                VendorPolicyGatewayHttpTest.Result first = VendorPolicyGatewayHttpTest.post(g, "/v1/responses", body);
+                check(first.status == 200, "first Gift tool request succeeds");
+                JSONArray items = completed(first.body, stream).getJSONArray("output");
+                JSONObject call = null;
+                for (int j = 0; j < items.length(); j++) if ("function_call".equals(items.getJSONObject(j).optString("type"))) call = items.getJSONObject(j);
+                check(call != null && "fixture_0".equals(call.optString("name")) && "gift-call".equals(call.optString("call_id")), "client receives named Gift call with ID");
+                check(arg.equals(new JSONObject(call.getString("arguments")).getString("value")), "tool argument arrives unchanged");
+                body.put("input", new JSONArray().put(new JSONObject().put("role", "user").put("content", "hello"))
+                        .put(new JSONObject().put("type", "function_call").put("name", call.getString("name")).put("call_id", call.getString("call_id")).put("arguments", call.getString("arguments")))
+                        .put(new JSONObject().put("type", "function_call_output").put("call_id", call.getString("call_id")).put("output", result)));
+                VendorPolicyGatewayHttpTest.Result second = VendorPolicyGatewayHttpTest.post(g, "/v1/responses", body);
+                check(second.status == 200 && "completed".equals(completed(second.body, stream).optString("status")) && second.body.contains("hello"), "second Gift turn completes");
+                check(gift.opens.get() == 2 && up.requests.size() == 2, "exactly two Gift sends");
+            } finally { ZCodeGift.setFixtureBase(null); ZCodeGift.resetBusyForTests(); ZCodeGift.resetCooldownForTests(); }
+        }
+        System.out.println("Responses Gift tool round trip PASS (" + count + " tools, stream=" + stream + ")");
+    }
+
+    static void giftResponsesAdmission() throws Exception {
+        try (VendorPolicyGatewayHttpTest.Upstream up = new VendorPolicyGatewayHttpTest.Upstream((r, n) -> {
+            throw new AssertionError("unexpected upstream request");
+        })) {
+            JSONObject config = ZCodeGiftUsageHttpTest.config(up.server.getLocalPort());
+            config.getJSONObject("server").put("authKey", "fixture-auth");
+            java.util.concurrent.atomic.AtomicInteger reads = new java.util.concurrent.atomic.AtomicInteger();
+            try (VendorPolicyGatewayHttpTest.Gateway gateway = new VendorPolicyGatewayHttpTest.Gateway(config, up, false)) {
+                gateway.gateway.setVendorConnectionsForTests(url -> { throw new AssertionError("unexpected paid request"); });
+                gateway.gateway.setGiftTransportForTest(new GatewayServer.GiftTransport() {
+                    public JSONObject summary(String jwt, String device) {
+                        reads.incrementAndGet();
+                        return new JSONObject().put("ok", false).put("status", 429).put("retryAfterMs", 3000);
+                    }
+                    public ZCodeGift.Stream open(String jwt, String device, String site, String model, JSONObject body, boolean dressed) {
+                        throw new AssertionError("unknown balance must block Gift inference");
+                    }
+                });
+                for (JSONObject body : Arrays.asList(responsesBody(false).put("store", true),
+                        responsesBody(true).put("max_tool_calls", 1))) {
+                    VendorPolicyGatewayHttpTest.Result refused = VendorPolicyGatewayHttpTest.post(gateway, "/v1/responses", body);
+                    check(refused.status == 400 && reads.get() == 0, "native-only fields rejected before balance lookup");
+                }
+                for (boolean stream : new boolean[]{false, true}) {
+                    VendorPolicyGatewayHttpTest.Result refused = VendorPolicyGatewayHttpTest.post(gateway, "/v1/responses", responsesBody(stream));
+                    check(refused.status == 429 && refused.body.contains("未改用付费 Plan"), "unknown Gift balance reported before HTTP stream commit");
+                }
+                check(reads.get() == 2 && up.requests.isEmpty(), "no inference when balance is uncertain");
+            }
+        }
+        System.out.println("Responses Gift admission PASS");
+    }
+
     public static void main(String[] args) throws Exception {
+        personalProjectAndList();
+        checkNoPlanUntilConfirmedActive();
         checkSubscriptionGate();
+        personalToolRoundTrip(false);
+        personalToolRoundTrip(true);
+        giftResponsesAdmission();
+        giftResponsesToolRoundTrip(false, 1);
+        giftResponsesToolRoundTrip(true, 35);
         List<String> failures = new ArrayList<>();
         for (boolean gift : new boolean[]{true, false}) for (String path : new String[]{"/v1/chat/completions", "/v1/messages", "/v1/responses"})
             for (boolean stream : new boolean[]{false, true}) for (boolean truncated : new boolean[]{false, true}) {
-                if (gift && path.endsWith("/responses")) { System.out.println("SKIP gift Responses: fixture returns Anthropic where adapter expects Chat"); continue; }
                 String label = (gift ? "gift" : "plan") + " " + path + " stream=" + stream + " truncated=" + truncated;
                 try { run(gift, path, stream, truncated); System.out.println("PASS " + label); }
                 catch (Throwable e) { failures.add(label + ": " + e); System.out.println("FAIL " + label + ": " + e); }

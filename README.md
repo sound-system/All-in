@@ -7,7 +7,7 @@ All In 将不同供应商的账号、API 密钥和模型集中到一个本地服
 
 项目由 [Gaeul](https://github.com/xunianooo) 开发。All In 参考并移植了 Magpie 和社区插件的部分设计与实现；感谢原项目及各位贡献者，详见下方[致谢](#致谢)。
 
-> 当前正式版为 **All In 1.2.70（76）**，改进 ZCode 套餐保护、Codex 模型同步、Loomy 账号选路和 Qoder CN 响应等待。详见[更新日志](docs/RELEASE_1.2.70-test.md)和[正式版下载](https://github.com/xunianooo/All-in/releases/tag/v1.2.70-test)。
+> 当前正式版为 **All In 1.2.90（96）**，修复网关口令回读和状态同步，扩展图片与视频接入，改善工具调用及上游诊断。详见[更新日志](docs/RELEASE_1.2.90-test.md)和[正式版下载](https://github.com/xunianooo/All-in/releases/tag/v1.2.90-test)。
 
 > 上一轮已发布 **All In 1.2.52 正式版**（包内 1.2.52-test / 58），见[发行页](https://github.com/xunianooo/All-in/releases/tag/v1.2.52-test)。供应商服务、客户端协议和系统后台策略可能变化；兼容与测试边界见该轮说明。
 
@@ -21,7 +21,7 @@ All In 将不同供应商的账号、API 密钥和模型集中到一个本地服
 
 **All In 1.2.48 正式版（54）** 在53版基础上复核并修补后续审查问题，见 [1.2.48 正式版说明](docs/RELEASE_1.2.48-test.md)。DNS 四槽与总连接期限只覆盖 `NetworkPolicy.connectTunnel` 原始 Socket 路径；`HttpURLConnection / openHttp` 仍使用平台 DNS，不受该四槽保护。平台 DNS 不响应中断时会继续占用原槽，网关不会无限增线程；管理状态接口的 `connections.outboundDns` 提供活动槽、饱和、超时和拒绝计数。
 
-> 本版本保留账号 JSON 文件导入/导出、签到、限流、供应商适配及流式能力。安装包、源码、更新清单与校验文件见 [1.2.70 正式版发布页](https://github.com/xunianooo/All-in/releases/tag/v1.2.70-test)。保留原证书，可从旧版覆盖升级；请勿卸载或清除应用数据。
+> 本版本保留账号 JSON 文件导入/导出、签到、限流、供应商适配及流式能力。安装包、源码、更新清单与校验文件见 [1.2.90 正式版发布页](https://github.com/xunianooo/All-in/releases/tag/v1.2.90-test)。保留原证书，可从旧版覆盖升级；请勿卸载或清除应用数据。
 
 ## All In 能做什么
 
@@ -100,6 +100,12 @@ curl http://127.0.0.1:3425/v1/chat/completions \
 | `POST /v1/responses` | OpenAI Responses 兼容入口 |
 | `POST /v1/messages` | Anthropic Messages 兼容入口 |
 | `POST /v1/images/generations` | 图片生成入口，具体支持取决于供应商 |
+| `POST /v1/images/edits` | MiniMax Code 参考图生成 |
+| `POST /v1/videos` | 提交 MiniMax Code 视频任务 |
+| `GET /v1/videos/{id}` | 查询视频状态 |
+| `GET /v1/videos/{id}/content` | 下载已完成的视频 |
+
+MiniMax Code 国内账号可用 `minimax-code/MiniMax-Image` 生成图片。视频模型为 `minimax-code/MiniMax-H3`、`minimax-code/MiniMax-H3-Max`、`minimax-code/MiniMax-Hailuo-2.3`。参考图可用 HTTPS URL、图片 data URL 或 multipart 上传。请保留提交返回的完整视频 ID，并用相同的网关口令查询。生成使用所选 MiniMax 账号的额度。
 
 网关根据供应商协议处理 JSON 和 SSE 流，也支持部分工具调用与图片场景。原生协议、跨协议转换、模型能力及客户端实现之间存在差异；不支持或无法安全转换的字段可能返回错误，而不是静默丢弃。更多信息见 [Responses 协议说明](docs/responses-bridge.md)和 [Agent 字段兼容说明](docs/responses-agent-compatibility.md)。
 

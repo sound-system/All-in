@@ -1088,7 +1088,8 @@
     .gateway-hero-heading {gap:14px;margin:23px 0 22px;align-items:center}
     .gateway-hero h1 {font-size:clamp(22px,5.2vw,30px);font-weight:700;letter-spacing:-.9px;line-height:1.35}
     .gateway-hero p {font-size:12.5px;line-height:1.8;margin-top:7px}
-    .access-state {font-size:11px;background:var(--accent-weak);color:var(--accent);padding:6px 10px;border-radius:999px}
+    .access-state {font-size:11px;padding:6px 10px;border-radius:999px}
+    .access-state[data-state="on"] {background:var(--accent-weak);color:var(--accent)}
     #access-refresh {min-width:96px;flex-shrink:0}
     .access-metrics {padding-top:18px;gap:10px}
     .access-metrics > div {gap:5px}
@@ -3401,11 +3402,18 @@ html[data-theme="dark"] .glass-switch-shell {
     let gatewayRunning = true;
     let gatewayPort = 3425;
     let statsFailures = 0;
+    let gatewayTogglePending = false;
 
     let gatewayStateAnimations = [];
     function applyGatewayUI(running, port) {
+      const stopped = gatewayRunning && !running;
       gatewayRunning = !!running;
       if (port) gatewayPort = port;
+      if (stopped) {
+        statusRevision++;
+        clearGatewayEndpoints();
+      }
+      renderGatewayConnectionState();
       const btn = document.getElementById('gw-toggle');
       const txt = document.getElementById('gw-toggle-text');
       if (!btn || !txt) return;
@@ -3452,7 +3460,7 @@ html[data-theme="dark"] .glass-switch-shell {
 
     // 供 Android 原生层回调
     window.__setGatewayState = function (running, port) {
-      applyGatewayUI(running, port);
+      if (!gatewayTogglePending) applyGatewayUI(running, port);
     };
 
     // 通过自定义 scheme 通知 Android 原生层开/关网关
@@ -3477,45 +3485,40 @@ html[data-theme="dark"] .glass-switch-shell {
         .catch(() => false);
     }
 
-    function toggleGateway() {
+    function refreshGatewayPanel() {
+      loadStats();
+      loadConfig();
+      loadAuthKey();
+    }
+
+    async function toggleGateway() {
+      if (gatewayTogglePending) return;
       const next = !gatewayRunning;
 
       if (!nativeGatewayAvailable()) {
         alert('网关开关仅在 Android App 内可用；当前是通过浏览器访问，网关由后台服务托管。');
         return;
       }
-
-      const sent = callNativeGateway(next);
-      if (!sent) {
+      if (!callNativeGateway(next)) {
         alert('切换失败：无法与原生层通信');
         return;
       }
 
-      // 乐观更新 + 真实状态确认
+      gatewayTogglePending = true;
       applyGatewayUI(next);
       showToast(next ? '🟢 正在启动网关 :' + gatewayPort : '⚪ 正在关闭网关...');
 
-      let tries = 0;
-      const timer = setInterval(() => {
-        tries++;
-        checkGatewayAlive().then(alive => {
-          if (alive === next) {
-            clearInterval(timer);
-            applyGatewayUI(alive);
-            showToast(alive
-              ? '🟢 网关已开启，正在监听 :' + gatewayPort
-              : '⚪ 网关已关闭，端口已释放');
-            if (alive) {
-              try { loadStats(); } catch (e) {}
-              try { loadConfig(); } catch (e) {}
-            }
-          } else if (tries >= 14) {
-            clearInterval(timer);
-            applyGatewayUI(alive);
-            showToast(alive ? '🟢 网关运行中' : '⚪ 网关已关闭');
-          }
-        });
-      }, 500);
+      let alive = !next;
+      for (let tries = 0; tries < 14 && alive !== next; tries++) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        alive = await checkGatewayAlive();
+      }
+      gatewayTogglePending = false;
+      applyGatewayUI(alive);
+      if (alive) refreshGatewayPanel();
+      showToast(alive
+        ? (next ? '🟢 网关已开启，正在监听 :' + gatewayPort : '🟢 网关运行中')
+        : (next ? '⚪ 网关已关闭' : '⚪ 网关已关闭，端口已释放'));
     }
 
     function nativeGatewayAvailable() {
@@ -6298,7 +6301,7 @@ html[data-theme="dark"] .glass-switch-shell {
           message=a.reasonCode?message.replace('领取后的结果未能确认','暂未收到官方确认'):'暂未收到官方的最终确认。请稍后查询状态，避免重复领取。';
         }
       }
-      if(a.provider==='qoder_cn'){if(a.outcome==='claimable')label='可领取';else if(a.outcome==='idle')label='待查询';else if(['done','claimed'].includes(a.outcome))label='本轮已领取';}
+      if(a.provider==='qoder_cn'){if(a.outcome==='claimable')label='可领取';else if(a.outcome==='idle')label='待查询';else if(['done','claimed'].includes(a.outcome))label='本轮已领取';else if(a.outcome==='daily_disabled')label='旧签到接口停用';else if(['inactive','not_offered'].includes(a.outcome)){label='未查到可领取奖励';if(a.outcome==='inactive')message='旧查询只检查了奖励活动，尚未核对独立每日签到接口；请点击查询签到更新状态。';}}
       if(a.outcome==='available'){tone='neutral';label=a.dailyQuota===0?'每日额度为0':'每日额度可用';message=a.message||'每日额度可用不代表新领取了签到奖励。';}
       if(['claimed','done','refreshed'].includes(a.outcome)&&a.verified!==true){label='待官方核实';tone='neutral';message='已有处理记录，但尚未取得官方成功确认；不会重复领取。';}
       return {label,message,tone};
@@ -6315,7 +6318,7 @@ html[data-theme="dark"] .glass-switch-shell {
       if(receipt)box.appendChild(checkinText('p',receipt.message,'checkin-action'));row.appendChild(box);
       if(!unsupported&&a.provider==='qoder_cn') {
         const ready=a.outcome==='claimable'&&a.claimPossible===true&&typeof a.campaignId==='string'&&a.campaignEnd>Date.now();
-        const btn=checkinText('button',ready?'领取':'查询活动','btn btn-outline');btn.type='button';btn.disabled=checkinActionBusy||!!(checkinData&&checkinData.running);
+        const btn=checkinText('button',ready?'领取':'查询签到','btn btn-outline');btn.type='button';btn.disabled=checkinActionBusy||!!(checkinData&&checkinData.running);
         btn.onclick=()=>ready?checkinClaimQoder(a.accountId,a.campaignId):checkinConfirm(a.provider,a.accountId);
         row.appendChild(btn);
       } else if(!unsupported) {
@@ -6568,7 +6571,11 @@ html[data-theme="dark"] .glass-switch-shell {
     }
     function renderGatewayConnectionState() {
       const node = document.getElementById('access-running');
-      if (node) node.textContent = statusKnown ? (gatewayRunning ? '● 网关运行中' : '网关已停止') : '网关状态暂不可用';
+      if (!node) return;
+      const state = !gatewayRunning ? 'off' : statusKnown ? 'on' : 'unknown';
+      if (node.getAttribute('data-state') === state) return;
+      node.setAttribute('data-state', state);
+      node.textContent = state === 'on' ? '● 网关运行中' : state === 'off' ? '网关已关闭' : '网关状态暂不可用';
     }
     const gatewayAccessAnimations = new WeakMap();
     function animateGatewayAccess(element, frames, duration, easing) {
@@ -6999,13 +7006,14 @@ html[data-theme="dark"] .glass-switch-shell {
         lanEl.placeholder = lanAddressUnavailableText();
       }
       if (keyEl) {
-        keyEl.value = currentAuthKey || '（未设置，网关当前不校验）';
+        keyEl.value = authKeyKnown ? (currentAuthKey || '（未设置，网关当前不校验）') : '';
+        keyEl.placeholder = authKeyKnown ? '' : '口令状态暂不可用';
         keyEl.type = authKeyVisible ? 'text' : 'password';
       }
       const state = document.getElementById('cred-key-state');
       if (state) {
         // 只监听本机时局域网设备连都连不上，不能再写「局域网内任何人可用」。
-        state.innerHTML = currentAuthKey
+        state.innerHTML = !authKeyKnown ? '● 口令状态暂不可用' : currentAuthKey
           ? '<span style="color:#34d399;">● 已启用鉴权</span>'
           : (listenLoopbackOnly()
             ? '<span style="color:#fbbf24;">● 未设口令（当前只监听本机，局域网设备无法连接）</span>'
@@ -7018,20 +7026,17 @@ html[data-theme="dark"] .glass-switch-shell {
     async function loadAuthKey() {
       const revision = ++authKeyRevision;
       try {
-        const res = await fetch(API_BASE + '/api/server-key');
+        const res = await fetch(API_BASE + '/api/server-key', { cache: 'no-store' });
+        if (!res.ok) return;
         const d = await res.json();
-        if (d && d.ok && revision === authKeyRevision) {
-          currentAuthKey = d.authKey || '';
-          authKeyKnown = true;
-          // 面板若是通过 sessionStorage 带的口令，以服务端为准
-          AUTH_KEY = currentAuthKey;
-          renderCredentials();
-        }
+        if (revision !== authKeyRevision || d?.ok !== true || typeof d.authKey !== 'string') return;
+        currentAuthKey = d.authKey;
+        authKeyKnown = true;
+        AUTH_KEY = currentAuthKey;
       } catch (e) {
-        if (revision !== authKeyRevision) return;
-        // 401 等情况：说明当前口令不对，把状态提示出来
-        const state = document.getElementById('cred-key-state');
-        if (state) state.innerHTML = '<span style="color:#f87171;">● 读取失败（令牌可能已变）</span>';
+        // 读取失败时保留上一次确认的口令状态。
+      } finally {
+        if (revision === authKeyRevision) renderCredentials();
       }
     }
 
@@ -7072,7 +7077,7 @@ html[data-theme="dark"] .glass-switch-shell {
         if (!text) { showToast(lanAddressUnavailableText()); return; }
       } else {
         text = currentAuthKey || '';
-        if (!text) { showToast('还没有设置密钥'); return; }
+        if (!text) { showToast(authKeyKnown ? '还没有设置密钥' : '口令状态暂不可用'); return; }
       }
       copyText(text, which === 'base' || which === 'lan' ? '✅ API 地址已复制' : '✅ API 密钥已复制', button);
     }
@@ -7181,13 +7186,24 @@ html[data-theme="dark"] .glass-switch-shell {
       }
     }
 
+    function clearGatewayEndpoints() {
+      statusKnown = false;
+      statusPort = 0;
+      gatewayIp = '';
+      statusLanUrl = '';
+      window.__etaSnippet = '';
+      listenPlanNoticeState = null;
+      try { renderListenPlan(); renderCredentials(); syncEtaAddress(); } catch (ignored) {}
+    }
+
     async function loadStats() {
+      if (gatewayTogglePending) return;
       const revision = ++statusRevision;
       try {
         const res = await fetch(API_BASE + '/api/status');
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
-        if (revision !== statusRevision) return;
+        if (revision !== statusRevision || gatewayTogglePending) return;
         document.getElementById('stat-total-req').innerText = data.totalRequests || 0;
         document.getElementById('stat-total-tokens').innerText = (data.totalTokens || 0).toLocaleString();
         document.getElementById('stat-total-masked').innerText = data.totalMasked || 0;
@@ -7211,15 +7227,13 @@ html[data-theme="dark"] .glass-switch-shell {
         if (previousBase !== gatewayBaseUrl()) window.__etaSnippet = '';
         try { renderListenPlan(); renderCredentials(); syncEtaAddress(); } catch (e) {}
         statsFailures = 0;
-        if (!gatewayRunning) applyGatewayUI(true);
+        applyGatewayUI(true);
       } catch (e) {
-        if (revision !== statusRevision) return;
-        statusKnown = false; statusPort = 0; gatewayIp = ''; statusLanUrl = ''; window.__etaSnippet = '';
-        listenPlanNoticeState = null;
-        try { renderListenPlan(); renderCredentials(); syncEtaAddress(); } catch (ignored) {}
+        if (revision !== statusRevision || gatewayTogglePending) return;
+        clearGatewayEndpoints();
         statsFailures++;
         // 给足 8 次容忍度，避免冷启动瞬时未就绪误判为关闭
-        if (statsFailures >= 8 && gatewayRunning) applyGatewayUI(false);
+        applyGatewayUI(gatewayRunning && statsFailures < 8);
       }
     }
 
@@ -7436,7 +7450,8 @@ html[data-theme="dark"] .glass-switch-shell {
       const keys = new Set((Array.isArray(p.keys) ? p.keys : []).map(k => typeof k === 'string' ? k.trim() : (k && typeof k === 'object' && typeof k.key === 'string' ? k.key.trim() : '')).filter(Boolean));
       const accounts = (Array.isArray(p.accounts) ? p.accounts : []).filter(a => a && typeof a === 'object' && !Array.isArray(a) && ['token','access','accessToken','refresh','refreshToken','jwt','apiKey'].some(k => typeof a[k] === 'string' && a[k].trim()));
       // Saved disabled accounts remain manageable; expired login mirrors alone are not accounts.
-      return {keys:accountRequired ? 0 : keys.size, accounts:accounts.length, models:Array.isArray(p.models) ? p.models.length : 0};
+      const models = ['minimax-code', 'codex'].includes(p.id) ? providerModelCardCatalog(p, mediaModelsFor(p.id)).models : p.models;
+      return {keys:accountRequired ? 0 : keys.size, accounts:accounts.length, models:Array.isArray(models) ? models.length : 0};
     }
     function providerConfigured(p) { const c = providerCounts(p); return c.keys > 0 || c.accounts > 0; }
     function providerEnabled(p) { return p.enabled !== false; }
@@ -8155,6 +8170,16 @@ html[data-theme="dark"] .glass-switch-shell {
       return {text:pid === 'cline' ? '计费' : '—', tone:'unknown'};
     }
     function buildModelTag(pid, modelName, meta) {
+      if (['minimax-code', 'codex'].includes(pid) && meta && ['image', 'video'].includes(meta.media_type)) {
+        const id = pid + '/' + modelName;
+        const tag = document.createElement('button');
+        tag.type = 'button';
+        tag.className = 'model-tag';
+        tag.textContent = modelDisplayName(modelName, meta);
+        tag.title = '复制调用 ID · ' + id;
+        tag.onclick = () => copyText(id, '模型 ID 已复制', tag);
+        return tag;
+      }
       const el = document.createElement('span');
       const cached = typeof providerBillingCache !== 'undefined' && providerBillingCache[pid];
       const entry = cached && cached.models && cached.models[modelName];
@@ -8183,6 +8208,28 @@ html[data-theme="dark"] .glass-switch-shell {
       if (accs.some(a => a && a.enabled !== false && ['token','access','refresh','jwt'].some(k => typeof a[k] === 'string' && a[k].trim()))) return true;
       const keys = Array.isArray(prov.keys) ? prov.keys : [];
       return keys.some(k => typeof k === 'string' ? !!k.trim() : k && k.enabled !== false && !k.off && typeof k.key === 'string' && !!k.key.trim());
+    }
+
+    function mediaModelsFor(pid) {
+      if (pid === 'codex') return appConfig?.codexImageModels;
+      if (pid === 'minimax-code') return appConfig?.miniMaxMediaModels;
+      return [];
+    }
+
+    function providerModelCardCatalog(prov, mediaModels) {
+      const models = prov && Array.isArray(prov.models) ? prov.models.filter(id => prov.id !== 'codex' || !/^(codex\/)?gpt-image-/.test(id)) : [];
+      const meta = {...((prov && prov.modelMeta) || {})};
+      if (prov && ['minimax-code', 'codex'].includes(prov.id) && providerHasCredential(prov) && Array.isArray(mediaModels)) {
+        const prefix = prov.id + '/';
+        for (const row of mediaModels) {
+          if (!row || typeof row.id !== 'string' || !row.id.startsWith(prefix) || !['image', 'video'].includes(row.media_type)) continue;
+          const id = row.id.slice(prefix.length);
+          if (!id) continue;
+          if (!models.includes(id)) models.push(id);
+          meta[id] = {name: row.name, media_type: row.media_type};
+        }
+      }
+      return {models, meta};
     }
 
     function renderAllModelsTags() {
@@ -8214,7 +8261,7 @@ html[data-theme="dark"] .glass-switch-shell {
           return;
         }
 
-        let models = prov && Array.isArray(prov.models) ? prov.models : [];
+        let {models, meta} = providerModelCardCatalog(prov, mediaModelsFor(pid));
         // zcode 的账号如果只有赠送额度（没有 Coding Plan），能调的只有 gift 覆盖的那几个，
         // 卡片上再显示 11 个就是在骗人（/v1/models 只给 1 个）。
         if (pid === 'zcode' && zcodeGiftModels.length > 0) {
@@ -8225,8 +8272,6 @@ html[data-theme="dark"] .glass-switch-shell {
             if (only.length > 0) models = only;
           }
         }
-        const meta = (prov && prov.modelMeta) || {};
-
         // 同步更新标题处的统计信息
         updateModelPoolSummary(pid, models, meta);
 
@@ -8509,7 +8554,7 @@ html[data-theme="dark"] .glass-switch-shell {
       const view = providerCatalogViews.get(pid) || {query:'',page:0};
       providerCatalogViews.set(pid, view);
       const prov = ((appConfig && appConfig.providers) || []).find(p => p.id === pid) || {id:pid};
-      const found = models.filter(m => typeof m === 'string' && modelMatches(pid + '/' + m, prov, view.query.toLowerCase()));
+      const found = models.filter(m => typeof m === 'string' && modelMatches(pid + '/' + m, {...prov, modelMeta: meta}, view.query.toLowerCase()));
       const page = modelPage(found, view.page); view.page = page.page;
       const active = activeInput || document.activeElement, focused = active && active.catalogProvider === pid;
       const caret = focused ? active.selectionStart : null;
@@ -10023,8 +10068,7 @@ html[data-theme="dark"] .glass-switch-shell {
     // 页面启动初始化
     window.addEventListener('DOMContentLoaded', () => {
       setTimeout(() => { queryGatewayState(); }, 200);
-      loadStats();
-      loadConfig();
+      refreshGatewayPanel();
       loadNetwork();
       loadOutbound();
       loadResilience();
@@ -10032,7 +10076,6 @@ html[data-theme="dark"] .glass-switch-shell {
       loadQuirks();
       try { loadRoutingState(); } catch (e) {}
       try { loadEtaCard(); } catch (e) {}
-      try { loadAuthKey(); } catch (e) {}
       // 首启向导：口令 → 权限 → 保活。API 不通时自动跳过，不会把面板锁死
       try { checkSetup(); } catch (e) {}
       // Slow the entire access-page polling bundle, not just its model request.
@@ -10042,22 +10085,23 @@ html[data-theme="dark"] .glass-switch-shell {
       function pollDashboard() {
         try {
           if (document.hidden) return;
-        const running = queryGatewayState();
-        if (!running) {
-          // 自愈探测：即使当前显示关闭，也定期探测端口，服务一旦运行立即自动唤醒并刷新！
-          checkGatewayAlive().then(alive => {
-            if (alive) {
-              applyGatewayUI(true);
-              loadStats();
-              loadConfig();
-            }
-          });
-          return;
-        }
-        loadStats();
-        loadConfig();
-        if (insightVisible()) refreshInsightData();
-        if (gatewayAccessVisible()) refreshGatewayAccess(false);
+          if (gatewayTogglePending) return;
+          if (!queryGatewayState()) {
+            // 网关从应用外启动时，重新读取状态和已保存的口令。
+            const revision = statusRevision;
+            checkGatewayAlive().then(alive => {
+              if (alive && !gatewayTogglePending && revision === statusRevision) {
+                applyGatewayUI(true);
+                refreshGatewayPanel();
+              }
+            });
+            return;
+          }
+          loadStats();
+          loadConfig();
+          if (!authKeyKnown) loadAuthKey();
+          if (insightVisible()) refreshInsightData();
+          if (gatewayAccessVisible()) refreshGatewayAccess(false);
         } finally { setTimeout(pollDashboard, dashboardPollDelay()); }
       }
       setTimeout(pollDashboard, dashboardPollDelay());

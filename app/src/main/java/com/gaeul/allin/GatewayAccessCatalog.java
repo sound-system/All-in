@@ -147,6 +147,45 @@ final class GatewayAccessCatalog {
         }
         return usableKey(p,model);
     }
+    static JSONObject codexImage(JSONObject config, long now, boolean enforceExposure) {
+        if (enforceExposure && !MiniMaxMediaInput.modelExposed(config.optJSONObject("exposed"), CodexImages.REF)) return null;
+        JSONArray providers = config.optJSONArray("providers");
+        for (int i = 0; providers != null && i < providers.length(); i++) {
+            JSONObject provider = providers.optJSONObject(i);
+            if (provider != null && CodexImages.PROVIDER.equals(provider.optString("id"))) {
+                return CodexImages.pick(provider, now) == null ? null : CodexImages.catalogEntry(provider);
+            }
+        }
+        return null;
+    }
+
+    static java.util.List<JSONObject> miniMaxMedia(JSONObject config) {
+        java.util.List<JSONObject> result = new java.util.ArrayList<>();
+        JSONArray providers = config.optJSONArray("providers");
+        for (int i = 0; providers != null && i < providers.length(); i++) {
+            JSONObject provider = providers.optJSONObject(i);
+            if (!enabled(provider) || !MiniMaxMedia.PROVIDER.equals(provider.optString("id"))) continue;
+            JSONArray accounts = provider.optJSONArray("accounts");
+            for (int j = 0; accounts != null && j < accounts.length(); j++) {
+                if (!MiniMaxMedia.available(accounts.optJSONObject(j))) continue;
+                addMiniMaxMedia(result, config, MiniMaxMedia.IMAGE, "image");
+                for (String video : MiniMaxMedia.VIDEOS) addMiniMaxMedia(result, config, video, "video");
+                return result;
+            }
+        }
+        return result;
+    }
+
+    private static void addMiniMaxMedia(java.util.List<JSONObject> result, JSONObject config, String model, String kind) {
+        String id = MiniMaxMedia.PROVIDER + "/" + model;
+        if (MiniMaxMediaInput.modelExposed(config.optJSONObject("exposed"), id)) {
+            result.add(new JSONObject().put("id", id).put("name", model.replace('-', ' ')).put("provider", MiniMaxMedia.PROVIDER)
+                    .put("providerName", "MiniMax Code").put("kind", "model").put("media_type", kind)
+                    .put("modalities", new JSONObject().put("input", new JSONArray().put("text").put("image"))
+                            .put("output", new JSONArray().put(kind))));
+        }
+    }
+
     static JSONObject build(JSONObject cfg, long now, GiftSnapshot gift) throws com.gaeul.allin.json.JSONException {
         JSONObject exposed=cfg.optJSONObject("exposed"); boolean filtered=exposed!=null && exposed.optBoolean("enabled",false);
         JSONArray whitelist=exposed==null?null:exposed.optJSONArray("items");
@@ -176,6 +215,7 @@ final class GatewayAccessCatalog {
             }
             QoderModelIdentity identities=QoderModelIdentity.of(p);
             for (String m:candidates) {
+                if (CodexImages.PROVIDER.equals(id) && CodexImages.matches(m)) continue;
                 boolean usable="zcode".equals(id) ? (gifts.contains(m) || (!giftOnly && accountUsable(p,m,now))) : accountUsable(p,m,now);
                 if (!usable) continue;
                 String full=id+"/"+m;
@@ -185,6 +225,9 @@ final class GatewayAccessCatalog {
         JSONArray result=new JSONArray();
         for(java.util.Map.Entry<String,JSONObject> e:available.entrySet())
             if(!filtered || contains(whitelist,e.getKey()) || contains(whitelist,e.getValue().optString("id"))) result.put(e.getValue());
+        for (JSONObject media : miniMaxMedia(cfg)) result.put(media);
+        JSONObject codex = codexImage(cfg, now, true);
+        if (codex != null) result.put(codex);
         JSONObject routing=cfg.optJSONObject("routing"); JSONArray groups=cfg.optJSONArray("groups");
         if(routing!=null && routing.optBoolean("groupsEnabled",false)) for(int i=0; groups!=null && i<groups.length(); i++) {
             JSONObject g=groups.optJSONObject(i); if(g==null || !g.optBoolean("enabled",true)) continue;

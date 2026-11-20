@@ -62,7 +62,7 @@ public final class DeepSeekWebTest {
   }
   for(int code:new int[]{401,403,429,500}) {final int status=code; final String body="{\"error\":\"upstream detail\"}";
    DeepSeekWeb broken=new DeepSeekWeb((m,u,h,b)->new DeepSeekWeb.Response(status,"application/json",new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8))),"test");
-   try{broken.validateToken();throw new AssertionError("status exception missing");}catch(DeepSeekWeb.UpstreamException e){check(e.upstreamStatus==status&&e.gatewayStatus==(status==401||status==403?401:status==429?429:502)&&e.responseBody.equals(body),"HTTP status and body");}
+   try{broken.validateToken();throw new AssertionError("status exception missing");}catch(DeepSeekWeb.UpstreamException e){check(e.upstreamStatus==status&&e.gatewayStatus==(status==401||status==403||status==429?status:502)&&e.responseBody.equals(body),"HTTP status and body");}
   }
   for(String error:new String[]{"data: {\"error\":{\"message\":\"denied\"}}\n\n","data: {\"code\":7,\"msg\":\"denied\"}\n\n","data: {\"data\":{\"biz_code\":8}}\n\n","event: error\ndata: bad news\n\n","event: close\ndata: {\"error\":\"failed\"}\n\n","event: other\ndata: {\"error\":\"failed\"}\n\n"}) {
    DeepSeekWeb.StreamState bad=new DeepSeekWeb.StreamState(null);bad.status="FINISHED";
@@ -76,7 +76,7 @@ public final class DeepSeekWebTest {
     if(!u.endsWith("/chat/completion"))return base.request(m,u,h,b);
     return new DeepSeekWeb.Response(status,"text/plain",new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)) {public void close() throws IOException {closed[0]=true;super.close();}});
    },"fake-token");
-   try{w.run(req,"s",null,null,30000);throw new AssertionError("completion error accepted");}catch(DeepSeekWeb.UpstreamException e){check(e.responseBody.equals(body)&&e.upstreamStatus==status&&e.gatewayStatus==(status==401||status==403?401:status==429?429:502)&&closed[0],"completion error close and mapping");}
+   try{w.run(req,"s",null,null,30000);throw new AssertionError("completion error accepted");}catch(DeepSeekWeb.UpstreamException e){check(e.responseBody.equals(body)&&e.upstreamStatus==status&&e.gatewayStatus==(status==401||status==403||status==429?status:502)&&closed[0],"completion error close and mapping");}
   }
   for(String stream:new String[]{"", "data: {\"p\":\"response/status\",\"v\":\"FINISHED\"}\n\ndata: {\"error\":\"late failure\"}\n\n"}) {
    Fake base=new Fake();final boolean[] closed={false};

@@ -36,6 +36,27 @@ public final class WorkBuddyRequestPolicy {
             }
         }
     }
+    // WorkBuddy 0.2.37: only Kimi K3.1 Pro rejects call-only assistant turns
+    // with null/empty text. Do not erase images, user/tool text, or tool payloads.
+    private static boolean callTextModel(String model) {
+        return model != null && model.matches("(?i)^kimi-k3\\.1-pro(?:-.*)?$");
+    }
+    private static boolean emptyCallText(Object value) {
+        if (value == null || value == JSONObject.NULL || "".equals(value)) return true;
+        if (!(value instanceof JSONArray)) return false;
+        JSONArray parts = (JSONArray)value;
+        for (int i = 0; i < parts.length(); i++) {
+            JSONObject part = parts.optJSONObject(i);
+            if (part == null || !"text".equals(part.optString("type"))) return false;
+            for (java.util.Iterator<String> fields = part.keys(); fields.hasNext();) {
+                String field = fields.next();
+                if (!"type".equals(field) && !"text".equals(field)) return false;
+            }
+            Object text = part.opt("text");
+            if (text != null && text != JSONObject.NULL && !"".equals(text)) return false;
+        }
+        return true;
+    }
     public static JSONObject transform(JSONObject input) throws Exception { return transform(input,false); }
     public static JSONObject transform(JSONObject input, boolean hideDsh) throws Exception {
         return transform(input,hideDsh,null);
@@ -57,11 +78,15 @@ public final class WorkBuddyRequestPolicy {
         out.remove("max_completion_tokens");
         JSONArray messages=out.optJSONArray("messages");
         if(messages==null) throw bad("missing messages");
+        boolean needsCallText = callTextModel(out.optString("model", ""));
         for(int i=0;i<messages.length();i++) {
             JSONObject m=messages.optJSONObject(i); if(m==null)throw bad("invalid message");
             if("developer".equals(m.optString("role"))) m.put("role","system");
             if(!hideDsh)harnessMessage(m);
             if(!"assistant".equals(m.optString("role")))continue;
+            JSONArray calls = m.optJSONArray("tool_calls");
+            if (needsCallText && calls != null && calls.length() > 0 && emptyCallText(m.opt("content")))
+                m.put("content", " ");
             Object existing=m.opt("reasoning");
             if(existing!=null && existing!=JSONObject.NULL && !(existing instanceof String))throw bad("invalid reasoning");
             String text=""; Object rc=m.opt("reasoning_content"), rd=m.opt("reasoning_details");

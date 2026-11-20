@@ -68,6 +68,10 @@ final class IngressBody {
         return read(in,headers,method,limit,cancellation,30000L);
     }
     static Result read(InputStream in, Map<String, String> headers, String method, int limit, OutboundLimiter.Cancellation cancellation, long timeoutMillis) {
+        return read(in, headers, method, limit, cancellation, timeoutMillis, false);
+    }
+    static Result read(InputStream in, Map<String, String> headers, String method, int limit,
+                       OutboundLimiter.Cancellation cancellation, long timeoutMillis, boolean binary) {
         if (cancellation != null && cancellation.isCancelled())
             return fail(408, "Request body cancelled or deadline exceeded", Classification.TIMEOUT, 0);
         int bound = limit > 0 ? Math.min(limit, MAX_LIMIT) : DEFAULT_LIMIT;
@@ -135,7 +139,7 @@ final class IngressBody {
                 count += n;
             }
             try {
-                String text = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                String text = binary ? new String(buffer, StandardCharsets.ISO_8859_1) : StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                         .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(buffer)).toString();
                 Result result = success(text, count);
                 result.memory = memory;

@@ -690,7 +690,7 @@ public class GatewayServer extends NanoHTTPD {
     private QoderAuth.ConnectionFactory qoderConnectionsForTests;
     void setQoderConnectionsForTests(QoderAuth.ConnectionFactory factory) { qoderConnectionsForTests=factory; }
     private HttpURLConnection openVendorConnection(String url) throws IOException {
-        return vendorConnectionFactory==null?NetworkPolicy.openHttp(url):vendorConnectionFactory.open(url);
+        return vendorConnectionFactory==null?CodexHttp1Connection.open(url):vendorConnectionFactory.open(url);
     }
     private DeepSeekWeb.Transport deepSeekTransport = new DeepSeekWeb.HttpTransport();
     void setDeepSeekTransportForTests(DeepSeekWeb.Transport transport) { deepSeekTransport=transport; }
@@ -5220,6 +5220,14 @@ public class GatewayServer extends NanoHTTPD {
         } finally { REQUEST_CONTEXT.remove(); PREPARED_BODY.remove(); BODY_ERROR.remove(); RESILIENCE_SCOPE.remove(); if (!handedOff) { finishContext(request); gate.leave(); } }
     }
 
+    private static void warnOnResponsesProjection(JSONObject original) {
+        if (original.has("reasoning") || original.has("include") || original.has("text") || original.optJSONArray("input") != null) {
+            String warning = RESP_WARNING.get();
+            RESP_WARNING.set(warning == null ? "responses-display-fields-may-be-omitted"
+                    : warning + ", responses-display-fields-may-be-omitted");
+        }
+    }
+
     private static void attachCallId(Response response,String id) {
         if(response==null || CallEvidence.id(id)==null)return;
         response.addHeader("X-AllIn-Request-Id",id);
@@ -5964,6 +5972,8 @@ public class GatewayServer extends NanoHTTPD {
                     try { newConf = ConfigurationView.restore(newConf, configJson, GatewayManagementCredential.get()); }
                     catch (IllegalArgumentException invalidReference) { return errorResponse(409,"配置凭据引用已失效，请刷新后重试"); }
                     newConf.remove("providerStateTokens");
+                    newConf.remove("miniMaxMediaModels");
+                    newConf.remove("codexImageModels");
                     if(configJson.has("checkin")) newConf.put("checkin",new JSONObject(configJson.getJSONObject("checkin").toString())); else newConf.remove("checkin");
                     if(configJson.has("affinity")) newConf.put("affinity",configJson.opt("affinity")); else newConf.remove("affinity");
                     if(configJson.has("resilience")) newConf.put("resilience",configJson.opt("resilience")); else newConf.remove("resilience");
@@ -6014,6 +6024,11 @@ public class GatewayServer extends NanoHTTPD {
                                 tokens.put(provider.getString("id"), providerStateToken(provider));
                         }
                         snapshot.put("providerStateTokens", tokens);
+                        JSONArray miniMaxMediaModels = new JSONArray();
+                        for (JSONObject media : GatewayAccessCatalog.miniMaxMedia(configJson)) miniMaxMediaModels.put(media);
+                        snapshot.put("miniMaxMediaModels", miniMaxMediaModels);
+                        JSONObject codexImage = GatewayAccessCatalog.codexImage(configJson, System.currentTimeMillis(), true);
+                        snapshot.put("codexImageModels", codexImage == null ? new JSONArray() : new JSONArray().put(codexImage));
                         snapshot.put("revision", configRevision());
                         return jsonResponse(snapshot);
                     }
@@ -6058,6 +6073,8 @@ public class GatewayServer extends NanoHTTPD {
                             known.add(pid + "/" + ms.optString(j, ""));
                         }
                     }
+                    if (GatewayAccessCatalog.codexImage(configJson, System.currentTimeMillis(), false) != null)
+                        known.add(CodexImages.REF);
                     JSONArray gs = configJson.optJSONArray("groups");
                     for (int i = 0; gs != null && i < gs.length(); i++) {
                         JSONObject g = gs.optJSONObject(i);
@@ -6101,13 +6118,19 @@ public class GatewayServer extends NanoHTTPD {
                     JSONObject p = ps.optJSONObject(i);
                     if (p == null) continue;
                     JSONArray ms = p.optJSONArray("models");
-                    if (ms == null || ms.length() == 0) continue;
+                    boolean codexProvider = CodexImages.PROVIDER.equals(p.optString("id"));
+                    boolean showCodexImage = codexProvider && CodexImages.pick(p, System.currentTimeMillis()) != null;
+                    if ((ms == null || ms.length() == 0) && !showCodexImage) continue;
                     JSONObject one = new JSONObject();
                     one.put("id", p.optString("id", ""));
                     one.put("name", p.optString("name", p.optString("id", "")));
                     one.put("live", providerHasCredential(p));
                     JSONArray list = new JSONArray();
-                    for (int j = 0; j < ms.length(); j++) list.put(ms.optString(j, ""));
+                    for (int j = 0; ms != null && j < ms.length(); j++) {
+                        String model = ms.optString(j, "");
+                        if (!codexProvider || !CodexImages.matches(model)) list.put(model);
+                    }
+                    if (showCodexImage) list.put(CodexImages.MODEL);
                     one.put("models", list);
                     provs.put(one);
                 }
@@ -7688,8 +7711,7 @@ public class GatewayServer extends NanoHTTPD {
                         new DeepSeekWeb(deepSeekTransport,token).validateToken();
                         return jsonResponse(addDeepSeekAccount(name,token));
                     } catch (DeepSeekWeb.UpstreamException e) {
-                        int status=DeepSeekWebChat.safeStatus(e);
-                        return errorResponse(status,DeepSeekWebChat.safeErrorMessage(status));
+                        return deepSeekWebError(new DeepSeekWebChat(token, deepSeekTransport), e);
                     }
                     catch (DeepSeekConfigFailure e) { return errorResponse(500,"网页账号保存失败"); }
                     catch (IOException e) { return errorResponse(502,"网页凭据验证失败，请检查网络"); }
@@ -8348,6 +8370,7 @@ public class GatewayServer extends NanoHTTPD {
                             QoderModelIdentity identities = QoderModelIdentity.of(p);
                             for (int j = 0; j < models.length(); j++) {
                                 String mName = models.getString(j);
+                                if (CodexImages.PROVIDER.equals(pid) && CodexImages.matches(mName)) continue;
                                 if (loomyAvailable != null) {
                                     JSONArray available=loomyAvailable; boolean found=false;
                                     for (int k=0; available!=null && k<available.length(); k++)
@@ -8371,6 +8394,12 @@ public class GatewayServer extends NanoHTTPD {
                     }
                 }
 
+                for (JSONObject media : GatewayAccessCatalog.miniMaxMedia(configJson)) {
+                    media.put("object", "model").put("owned_by", MiniMaxMedia.PROVIDER);
+                    arr.put(media);
+                }
+                JSONObject codexImage = GatewayAccessCatalog.codexImage(configJson, System.currentTimeMillis(), true);
+                if (codexImage != null) arr.put(codexImage.put("object", "model").put("owned_by", CodexImages.PROVIDER));
                 res.put("data", arr);
                 if (!listAll) {
                     res.put("total_available", arr.length());
@@ -8386,7 +8415,19 @@ public class GatewayServer extends NanoHTTPD {
 
             // 9b. Loomy 绘图：Magpie 的 drawImages 把绘图请求交给同一网关的 /images/generations。
             // 治理与其它模型路由一致：隐私开关、模型与账号可用性、取消、出站节流都在下面复用现成实现。
-            if ("/v1/images/generations".equals(uri)) return loomyImageResponse(method, rawBody);
+            if (GatewayAccessPolicy.miniMaxMedia(uri)) return miniMaxMediaResponse(session, rawBody);
+            if ("/v1/images/generations".equals(uri)) {
+                if (MiniMaxMediaInput.multipart(session.getHeaders().get("content-type"))) return miniMaxMediaResponse(session, rawBody);
+                try {
+                    JSONObject image = new JSONObject(rawBody);
+                    String model = image.optString("model").trim();
+                    if (CodexImages.matches(model) || model.startsWith(CodexImages.PROVIDER + "/"))
+                        return codexImageResponse(method, image);
+                    if (MiniMaxMedia.IMAGE.equals(MiniMaxMedia.rawModel(model)) || model.startsWith("minimax-code/"))
+                        return miniMaxMediaResponse(session, rawBody);
+                } catch (com.gaeul.allin.json.JSONException invalid) { }
+                return loomyImageResponse(method, rawBody);
+            }
 
             // 10. 核心转发接口：/v1/chat/completions 与 /v1/messages
             if ("/responses".equals(uri)) uri="/v1/responses";
@@ -8590,11 +8631,21 @@ public class GatewayServer extends NanoHTTPD {
 
                 // ===== OpenAI 形态的 zcode 请求优先走 gift：赠送额度只认 session，Key 花不到。
                 // 模型不在赠送额度支持范围内时返回 null，继续走原来的 Coding Plan 路径。
-                if (RESP_REQUEST.get()==null && !NativeAnthropicPolicy.requiresNative(NATIVE_REQUEST.get())
-                        && "zcode".equals(providerIdOf(requestedModel))) {
+                if ("zcode".equals(providerIdOf(requestedModel))
+                        && !NativeAnthropicPolicy.requiresNative(NATIVE_REQUEST.get())) {
+                    JSONObject original = RESP_REQUEST.get();
+                    if (original != null) {
+                        String unsupported = ResponsesBridge.nativeOnlyReason(original);
+                        if (unsupported != null) {
+                            return errorResponse(400, "Responses cannot be converted for selected route: " + unsupported);
+                        }
+                    }
                     Response gift = tryZCodeGiftOpenAI(payload, requestedModel, clientWantsStream,
                             maskSession, guardResult);
-                    if (gift != null) return gift;
+                    if (gift != null) {
+                        if (original != null) warnOnResponsesProjection(original);
+                        return gift;
+                    }
                 }
 
                 // ===== 候选与降级：对齐 magpie 的 order 语义 =====
@@ -9219,7 +9270,8 @@ public class GatewayServer extends NanoHTTPD {
         // The socket reader has its own 5s idle timeout. Do not close a buffered
         // input on the watchdog thread: some implementations block close behind read.
         IngressBody.Result result = IngressBody.read(session.getInputStream(), session.getHeaders(),
-                session.getMethod() == null ? null : session.getMethod().name(), bodyLimitBytes(), REQUEST_CONTEXT.get());
+                session.getMethod() == null ? null : session.getMethod().name(), bodyLimitBytes(), REQUEST_CONTEXT.get(),
+                30000L, GatewayAccessPolicy.mediaIngress(session.getUri()) && MiniMaxMediaInput.multipart(session.getHeaders().get("content-type")));
         if (!result.ok()) { BODY_ERROR.set(result); result.close(); }
         else BODY_ALLOCATION.set(result);
         return result.text;
@@ -10789,9 +10841,16 @@ public class GatewayServer extends NanoHTTPD {
             out.textOut=result.text; out.reasoningOut=result.reasoning; out.ok=true; out.status=200; return out;
         } catch(ProtocolResponseException invalid) { return failedProtocolAttempt(out);
         } catch(DeepSeekWeb.UpstreamException e) {
-            out.status=DeepSeekWebChat.safeStatus(e); out.body=DeepSeekWebChat.safeErrorMessage(out.status);
-            out.response=errorResponse(out.status,out.body); return out;
+            out.status = e.gatewayStatus;
+            out.body = DeepSeekWebChat.safeErrorMessage(out.status);
+            out.stopFallback = true;
+            out.response = deepSeekWebError(web, e);
+            return out;
         } catch(Exception e) { out.status=502; out.body="DeepSeek web request failed"; out.response=errorResponse(502,out.body); return out; }
+    }
+
+    private Response deepSeekWebError(DeepSeekWebChat web, DeepSeekWeb.UpstreamException failure) {
+        return errorResponseWithDetail(failure.gatewayStatus, web.errorDetail(failure.gatewayStatus, failure));
     }
 
     private static String recentRef(RouteTarget target) { return target.providerId + "/" + target.upstreamModel; }
@@ -11801,6 +11860,374 @@ public class GatewayServer extends NanoHTTPD {
      * Body and answer stay verbatim apart from masking, as upstream sends them: a draw has no
      * messages to rewrite.
      */
+    /** Media models use the domestic account's Matrix connector, never the chat transport. */
+    private Response codexImageResponse(String method, JSONObject image) {
+        if (!"POST".equals(method)) return errorResponse(405, "POST required");
+        if (!CodexImages.matches(image.optString("model"))) return errorResponse(400, "Unknown Codex drawing model");
+        JSONObject config = configJson;
+        if (!MiniMaxMediaInput.modelExposed(config.optJSONObject("exposed"), CodexImages.REF))
+            return errorResponse(403, "Codex drawing model is not exposed");
+        JSONObject provider = findProviderById(config.optJSONArray("providers"), CodexImages.PROVIDER);
+        if (provider == null || !provider.optBoolean("enabled", true)) return errorResponse(403, "Codex unavailable");
+        JSONObject account = CodexImages.pick(provider, System.currentTimeMillis());
+        if (account == null) return errorResponse(401, "Codex drawing requires a ChatGPT subscription sign-in");
+        RequestContext request = REQUEST_CONTEXT.get();
+        if (request == null) return errorResponse(503, "Image request context unavailable");
+
+        JSONObject payload;
+        PrivacyMasker.Session mask = new PrivacyMasker.Session();
+        PrivacyMasker.Config privacy = PrivacyMasker.Config.fromJson(config.optJSONObject("privacy"));
+        try {
+            if (!(image.opt("prompt") instanceof String)) return errorResponse(400, "Image prompt is required");
+            payload = CodexImages.request(image, PrivacyMasker.maskText(image.getString("prompt"), mask, privacy));
+        } catch (PrivacyMasker.PrivacyException invalid) {
+            return errorResponse(400, "Image prompt exceeds the privacy placeholder budget");
+        } catch (IllegalArgumentException invalid) {
+            return errorResponse(400, invalid.getMessage());
+        }
+        totalMasked.addAndGet(mask.interceptedCount);
+        lastMaskedCount = mask.interceptedCount;
+        lastMaskEnabled = privacy.enabled;
+        lastMaskAt = System.currentTimeMillis();
+
+        RouteTarget target = new RouteTarget();
+        target.providerId = CodexImages.PROVIDER;
+        target.baseUrl = CodexImages.ENDPOINT;
+        target.upstreamModel = CodexImages.MODEL;
+        target.protocol = "codex";
+        target.account = account;
+        target.apiKey = CodexImages.access(account);
+        CodexAuth.SignInInfo info = new CodexAuth.SignInInfo();
+        info.authMode = "chatgpt";
+        info.accessToken = target.apiKey;
+        info.refreshToken = account.optString("refresh");
+        info.accountId = account.optString("accountId");
+        info.idToken = account.optString("idToken");
+        info.email = account.optString("email", account.optString("name"));
+        info.expiresAt = account.optLong("expires", 0);
+        byte[] bytes = payload.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        try (OutboundLimiter.Ticket ticket = admitOutbound(target, request)) {
+            synchronized (this) {
+                JSONObject current = findCodexAccount(configJson, account);
+                if (!CodexImages.usable(current, System.currentTimeMillis()) || !CodexImages.access(current).equals(info.accessToken)
+                        || !current.optString("refresh").equals(info.refreshToken) || !current.optString("idToken").equals(info.idToken)
+                        || !MiniMaxMediaInput.modelExposed(configJson.optJSONObject("exposed"), CodexImages.REF))
+                    return errorResponse(403, "Codex drawing configuration changed");
+                bindCodexPersistence(current, info);
+            }
+            request.check();
+            if ((info.accessToken.isEmpty() || (info.expiresAt > 0 && info.expiresAt - System.currentTimeMillis() < 5 * 60 * 1000L))
+                    && !info.refreshToken.isEmpty()) {
+                CodexAuth.refreshToken(info, "proactive_expiry");
+            }
+            if (info.accessToken.isEmpty()) return errorResponse(401, "Codex sign-in unavailable");
+            request.check();
+            HttpURLConnection conn = openVendorConnection(CodexImages.ENDPOINT);
+            try {
+                request.attach(conn);
+                conn.setInstanceFollowRedirects(false);
+                conn.setRequestMethod("POST");
+                conn.setDoOutput(true);
+                conn.setConnectTimeout((int) Math.max(1, Math.min(30000, request.remainingMillis())));
+                conn.setReadTimeout((int) Math.max(1, Math.min(180000, request.remainingMillis())));
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setRequestProperty("Accept", "application/json");
+                conn.setRequestProperty("Accept-Encoding", "identity");
+                conn.setRequestProperty("Authorization", "Bearer " + info.accessToken);
+                if (!info.accountId.isEmpty()) conn.setRequestProperty("chatgpt-account-id", info.accountId);
+                conn.setRequestProperty("originator", CodexAuth.ORIGINATOR);
+                conn.setRequestProperty("User-Agent", CodexAuth.USER_AGENT);
+                conn.setRequestProperty("x-codex-imagegen-request-id", java.util.UUID.randomUUID().toString());
+                conn.setRequestProperty("x-codex-image-turn-id", java.util.UUID.randomUUID().toString());
+                conn.setFixedLengthStreamingMode(bytes.length);
+                request.check();
+                ticket.markSent();
+                UsageLedger.Row row = U_ROW.get();
+                if (row != null) row.outboundAt = System.currentTimeMillis();
+                RequestDiagnostics.handoff(row);
+                try (OutputStream out = conn.getOutputStream()) { out.write(bytes); }
+                int status = conn.getResponseCode();
+                if (status < 200 || status >= 300) {
+                    int visible = status >= 400 && status <= 599 ? status : 502;
+                    Response response = errorResponse(visible, "Codex image upstream HTTP " + status);
+                    String retry = conn.getHeaderField("Retry-After");
+                    if (status == 429 && retry != null && retry.matches("[0-9]{1,9}")) response.addHeader("Retry-After", retry);
+                    return response;
+                }
+                String body = BoundedResponse.readUtf8(conn.getInputStream(), CodexImages.MAX_RESPONSE_BYTES, request.remainingMillis());
+                request.check();
+                new BoundedStrictJson(body).run();
+                if (!CodexImages.hasImage(new JSONObject(body))) return errorResponse(502, "Codex did not return an image");
+                Response response = newFixedLengthResponse(Status.OK, "application/json; charset=UTF-8", body);
+                response.addHeader("Cache-Control", "no-store");
+                response.addHeader("X-Magpie-Served-By", CodexImages.PROVIDER);
+                addCorsHeaders(response);
+                return response;
+            } finally {
+                request.detach(conn);
+                conn.disconnect();
+            }
+        } catch (OutboundRejected rejected) {
+            Response response = errorResponse(rejected.status, "Codex drawing outbound admission rejected");
+            if (rejected.retryMillis > 0) response.addHeader("Retry-After", Long.toString((rejected.retryMillis + 999) / 1000));
+            return response;
+        } catch (InterruptedException cancelled) {
+            Thread.currentThread().interrupt();
+            return errorResponse(503, "Codex drawing cancelled");
+        } catch (java.net.SocketTimeoutException timeout) {
+            return errorResponse(504, "Codex drawing timed out");
+        } catch (Exception failure) {
+            return errorResponse(request.isCancelled() ? 503 : 502, "Codex drawing request failed");
+        }
+    }
+
+    private Response miniMaxMediaResponse(IHTTPSession session, String rawBody) {
+        String path = session.getUri();
+        boolean create = path.equals("/v1/videos"), image = !path.startsWith("/v1/videos");
+        boolean write = image || create;
+        if (session.getMethod() != (write ? Method.POST : Method.GET))
+            return errorResponse(405, write ? "POST required" : "GET required");
+        try {
+            JSONObject body = new JSONObject();
+            String model, task = "", handle = "";
+            if (write) {
+                try {
+                    String contentType = session.getHeaders().get("content-type");
+                    body = MiniMaxMediaInput.parse(rawBody, contentType);
+                } catch (MiniMaxMedia.Failure bad) { return errorResponse(bad.status, bad.getMessage()); }
+                model = MiniMaxMedia.rawModel(body.optString("model", image ? MiniMaxMedia.IMAGE : ""));
+                if (image ? !MiniMaxMedia.IMAGE.equals(model) : !MiniMaxMedia.isVideo(model))
+                    return errorResponse(400, "Select a MiniMax Code media model for this endpoint");
+                PrivacyMasker.Session mask = new PrivacyMasker.Session();
+                PrivacyMasker.Config privacy = PrivacyMasker.Config.fromJson(configJson.optJSONObject("privacy"));
+                body.put("prompt", PrivacyMasker.maskText(MiniMaxMedia.string(body.opt("prompt")), mask, privacy));
+                totalMasked.addAndGet(mask.interceptedCount);
+                lastMaskedCount = mask.interceptedCount;
+                lastMaskEnabled = privacy.enabled;
+                lastMaskAt = System.currentTimeMillis();
+            } else {
+                handle = path.substring("/v1/videos/".length()).replaceFirst("/content$", "");
+                int split = handle.indexOf("::"), dot = handle.lastIndexOf('.');
+                if (split < 1 || dot <= split + 2) return errorResponse(404, "MiniMax video task unavailable");
+                model = handle.substring(0, split);
+                task = handle.substring(split + 2, dot);
+                if (!MiniMaxMedia.isVideo(model) || !MiniMaxMedia.validTask(task)) return errorResponse(404, "MiniMax video task unavailable");
+            }
+            String ref = MiniMaxMedia.PROVIDER + "/" + model;
+            JSONObject configuration = configJson;
+            JSONObject exposed = configuration.optJSONObject("exposed");
+            if (!MiniMaxMediaInput.modelExposed(exposed, ref)) return errorResponse(403, "MiniMax media model is not exposed");
+            JSONObject provider = findProviderById(configuration.optJSONArray("providers"), MiniMaxMedia.PROVIDER);
+            if (provider == null || !provider.optBoolean("enabled", true)) return errorResponse(403, "MiniMax Code unavailable");
+            JSONArray accounts = provider.optJSONArray("accounts");
+            JSONObject account = null;
+            String caller = presentedKey(session);
+            String key = GatewayManagementCredential.get();
+            if (key.isEmpty()) return errorResponse(503, "Gateway management identity unavailable");
+            for (int i = 0; accounts != null && i < accounts.length(); i++) {
+                JSONObject candidate = accounts.optJSONObject(i);
+                if (!MiniMaxMedia.available(candidate)) continue;
+                String id = candidate.optString("id");
+                if (!write && !MiniMaxMediaInput.matches(handle, task, model, id, caller, key)) continue;
+                account = candidate;
+                break;
+            }
+            if (account == null) return errorResponse(write ? 401 : 404,
+                    write ? "MiniMax Code sign-in unavailable" : "MiniMax video task unavailable");
+            RequestContext request = REQUEST_CONTEXT.get();
+            if (request == null) return errorResponse(503, "Media request context unavailable");
+            MiniMaxMediaSession mediaSession = new MiniMaxMediaSession(account, model, request);
+            MiniMaxMedia media = new MiniMaxMedia(mediaSession);
+            if (image) return miniMaxMediaJson(media.image(body, path.endsWith("/edits")));
+            if (create) {
+                JSONObject result = media.startVideo(model, body);
+                result.put("id", MiniMaxMediaInput.handle(result.getString("id"), model, mediaSession.lease.id, caller, key));
+                return miniMaxMediaJson(result);
+            }
+            JSONObject state = media.query(model, task);
+            JSONObject output = MiniMaxMedia.status(state, handle, model);
+            if (!path.endsWith("/content")) return miniMaxMediaJson(output);
+            if (!"completed".equals(output.optString("status"))) return errorResponse(409, "MiniMax video is not ready");
+            return mediaSession.download(media.videoAsset(state));
+        } catch (MiniMaxMedia.Failure e) {
+            return errorResponse(e.status, e.getMessage());
+        } catch (OutboundRejected e) {
+            Response response = errorResponse(e.status, "MiniMax media outbound admission rejected");
+            if (e.retryMillis > 0) response.addHeader("Retry-After", Long.toString((e.retryMillis + 999) / 1000));
+            return response;
+        } catch (PrivacyMasker.PrivacyException e) {
+            return errorResponse(400, "Media prompt exceeds the privacy placeholder budget");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return errorResponse(503, "MiniMax media request cancelled");
+        } catch (Exception e) {
+            return errorResponse(502, "MiniMax media request failed or timed out. Check task status before submitting again.");
+        }
+    }
+
+    private Response miniMaxMediaJson(JSONObject body) {
+        Response response = jsonResponse(body);
+        response.addHeader("X-Magpie-Served-By", MiniMaxMedia.PROVIDER);
+        return response;
+    }
+
+    private final class MiniMaxMediaSession implements MiniMaxMedia.Transport {
+        private final JSONObject account;
+        private final RequestContext request;
+        private final RouteTarget target = new RouteTarget();
+        private MiniMaxLifecycle.Lease lease;
+
+        MiniMaxMediaSession(JSONObject account, String model, RequestContext request) {
+            this.account = account;
+            this.request = request;
+            target.providerId = MiniMaxMedia.PROVIDER;
+            target.protocol = "minimax";
+            target.baseUrl = MiniMaxAuth.LLM;
+            target.upstreamModel = model;
+            target.account = account;
+        }
+
+        private void current() throws Exception {
+            request.check();
+            if (lease != null) synchronized (GatewayServer.this) {
+                reconcileMiniMax();
+                if (!MiniMaxMedia.available(miniAccount(configJson, lease.id)) || !minimaxLifecycle().isCurrent(lease))
+                    throw MiniMaxMedia.upstream("MiniMax media account changed");
+            }
+        }
+
+        @Override public void pause(long millis) throws IOException, InterruptedException { request.awaitMillis(millis); }
+
+        @Override public JSONObject post(String path, JSONObject body, int timeout) throws Exception {
+            if (!MiniMaxMedia.LIST.equals(path) && !MiniMaxMedia.CALL.equals(path)) throw new IllegalArgumentException();
+            current();
+            if (lease == null) {
+                try { lease = miniLease(account, false, null); }
+                catch (Exception e) { throw new MiniMaxMedia.Failure(401, "MiniMax Code account needs sign-in"); }
+            }
+            byte[] data = body.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            for (int attempt = 0; attempt < 2; attempt++) {
+                current();
+                target.apiKey = lease.credentials.access;
+                try (OutboundLimiter.Ticket ticket = admitOutbound(target, request)) {
+                    HttpURLConnection conn = openVendorConnection(MiniMaxAuth.LLM + path);
+                    try {
+                        configure(conn, timeout);
+                        conn.setRequestMethod("POST");
+                        conn.setDoOutput(true);
+                        conn.setFixedLengthStreamingMode(data.length);
+                        conn.setRequestProperty("Content-Type", "application/json");
+                        conn.setRequestProperty("Accept", "application/json");
+                        conn.setRequestProperty("User-Agent", "MiniMaxAgent");
+                        conn.setRequestProperty("Authorization", "Bearer " + target.apiKey);
+                        current();
+                        ticket.markSent();
+                        try (OutputStream out = conn.getOutputStream()) { out.write(data); }
+                        int status = conn.getResponseCode();
+                        if (status != 401 || attempt != 0) {
+                            checkStatus(status);
+                            JSONObject result = MiniMaxMedia.strictObject(BoundedResponse.readUtf8(conn.getInputStream(), 2 * 1024 * 1024, request.remainingMillis()));
+                            MiniMaxMedia.checkCode(result, "code");
+                            JSONObject statusInfo = result.optJSONObject("statusInfo");
+                            if (statusInfo != null) MiniMaxMedia.checkCode(statusInfo, "code");
+                            if (result.has("base_resp")) {
+                                JSONObject nested = result.optJSONObject("base_resp");
+                                if (nested == null || !nested.has("status_code")) throw MiniMaxMedia.upstream("Invalid MiniMax base_resp");
+                                MiniMaxMedia.checkCode(nested, "status_code");
+                            }
+                            current();
+                            return result;
+                        }
+                    } finally { request.detach(conn); conn.disconnect(); }
+                }
+                current();
+                MiniMaxLifecycle.Lease renewed;
+                try { renewed = miniLease(account, true, lease); }
+                catch (Exception e) { throw new MiniMaxMedia.Failure(401, "MiniMax Code sign-in renewal failed"); }
+                if (renewed.credentials.access.equals(lease.credentials.access)) throw new MiniMaxMedia.Failure(401, "MiniMax Code sign-in refused");
+                lease = renewed;
+            }
+            throw new AssertionError();
+        }
+
+        private void checkStatus(int status) throws MiniMaxMedia.Failure {
+            if (status >= 200 && status < 300) return;
+            int visible = status >= 400 && status <= 599 ? status : 502;
+            throw new MiniMaxMedia.Failure(visible, "MiniMax media upstream HTTP " + status);
+        }
+
+        private void configure(HttpURLConnection connection, int timeout) throws IOException {
+            request.attach(connection);
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout((int)Math.max(1, Math.min(15000, request.remainingMillis())));
+            connection.setReadTimeout((int)Math.max(1, Math.min(timeout, request.remainingMillis())));
+            connection.setRequestProperty("Accept-Encoding", "identity");
+        }
+
+        @Override public void upload(String url, JSONObject fields, String part, String mime, byte[] data) throws Exception {
+            current();
+            MiniMaxMediaInput.checkAssetHost(url);
+            MiniMaxMediaInput.UploadForm form = MiniMaxMediaInput.uploadForm(fields, part, mime, data.length);
+            try (OutboundLimiter.Ticket ticket = admitOutbound(target, request)) {
+                HttpURLConnection conn = openVendorConnection(url);
+                try {
+                    configure(conn, 55000);
+                    conn.setRequestMethod("POST");
+                    conn.setDoOutput(true);
+                    conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + form.boundary);
+                    conn.setFixedLengthStreamingMode(form.start.length + data.length + form.end.length);
+                    current();
+                    ticket.markSent();
+                    try (OutputStream out = conn.getOutputStream()) { out.write(form.start); out.write(data); out.write(form.end); }
+                    checkStatus(conn.getResponseCode());
+                } finally { request.detach(conn); conn.disconnect(); }
+            }
+        }
+
+        Response download(String url) throws Exception {
+            current();
+            MiniMaxMediaInput.checkAssetHost(url);
+            OutboundLimiter.Ticket ticket = admitOutbound(target, request);
+            HttpURLConnection connection = null;
+            boolean handedOff = false;
+            try {
+                connection = openVendorConnection(url);
+                configure(connection, 55000);
+                ticket.markSent();
+                checkStatus(connection.getResponseCode());
+                String type = connection.getContentType();
+                if (type != null && !type.toLowerCase(java.util.Locale.ROOT).matches("(video/[a-z0-9.+-]+|application/octet-stream)(;.*)?"))
+                    throw MiniMaxMedia.upstream("MiniMax returned an unexpected video content type");
+                long length = connection.getContentLengthLong();
+                if (length > MiniMaxMediaInput.MAX_VIDEO_BYTES) throw MiniMaxMedia.upstream("MiniMax video exceeds the download limit");
+                final HttpURLConnection conn = connection;
+                InputStream stream = new java.io.FilterInputStream(conn.getInputStream()) {
+                    private long bytes;
+                    private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean();
+                    private void count(int n) throws IOException {
+                        if (n > 0 && (bytes += n) > MiniMaxMediaInput.MAX_VIDEO_BYTES) throw new IOException("MiniMax video too large");
+                    }
+                    @Override public int read() throws IOException { request.check(); int value = super.read(); if (value >= 0) count(1); return value; }
+                    @Override public int read(byte[] b, int off, int n) throws IOException { request.check(); int got = super.read(b, off, n); count(got); return got; }
+                    @Override public void close() throws IOException {
+                        if (!closed.compareAndSet(false, true)) return;
+                        try { super.close(); } finally { request.detach(conn); conn.disconnect(); ticket.close(); }
+                    }
+                };
+                Response response = newFixedLengthResponse(Status.OK, "video/mp4", stream, length);
+                addCorsHeaders(response);
+                response.addHeader("X-Magpie-Served-By", MiniMaxMedia.PROVIDER);
+                handedOff = true;
+                return response;
+            } finally {
+                if (!handedOff) {
+                    if (connection != null) { request.detach(connection); connection.disconnect(); }
+                    ticket.close();
+                }
+            }
+        }
+    }
+
     private Response loomyImageResponse(String method, String rawBody) {
         if (!"POST".equals(method)) return errorResponse(405, "POST required");
         if (rawBody == null || rawBody.trim().isEmpty()) return errorResponse(400, "Empty payload");
@@ -12971,7 +13398,13 @@ public class GatewayServer extends NanoHTTPD {
             // 每个候选独立一份请求体，避免改动互相污染
             JSONObject payload = new JSONObject(payloadIn.toString());
             payload.put("model", target.upstreamModel);
-            int effectiveOutput=effectiveOutputLimit(target,payload,guardCfg);
+            int effectiveOutput;
+            if ("trae-cn".equals(target.providerId) && namedOutputLimit() <= 0) {
+                // A Trae catalog default belongs to a specific upstream function.
+                effectiveOutput = guardCfg.enabled ? guardCfg.maxOutputTokens : 0;
+            } else {
+                effectiveOutput = effectiveOutputLimit(target, payload, guardCfg);
+            }
             if(effectiveOutput>0) payload.put("max_tokens",effectiveOutput);
             if("zcode".equals(target.providerId)) {
                 try { payload=ZCodeRequestPolicy.chat(payload); }
@@ -13059,7 +13492,7 @@ public class GatewayServer extends NanoHTTPD {
                 if (candidate != null && "codex".equals(target.providerId)) RESP_NATIVE_CANDIDATE.set(candidate);
                 else RESP_NATIVE_CANDIDATE.remove();
                 if (candidate == null) {
-                    if(responseOriginal.has("reasoning") || responseOriginal.has("include") || responseOriginal.has("text") || responseOriginal.optJSONArray("input")!=null) RESP_WARNING.set((RESP_WARNING.get()==null?"":RESP_WARNING.get()+", ")+"responses-display-fields-may-be-omitted");
+                    warnOnResponsesProjection(responseOriginal);
                     String unsupported=ResponsesBridge.nativeOnlyReason(responseOriginal);
                     if (unsupported!=null) { out.status=400; out.body="Responses cannot be converted for selected route: "+unsupported; out.response=errorResponse(400,out.body); return out; }
                     if ("responses".equalsIgnoreCase(target.protocol) && !"codex".equals(target.providerId)) {
@@ -13381,6 +13814,25 @@ public class GatewayServer extends NanoHTTPD {
             }
             out.status = statusCode;
             if (isWorkBuddy && statusCode == 400) out.stopFallback = true;
+
+            if ("loomy".equals(target.providerId)) {
+                if (statusCode == 401 || statusCode == 403) {
+                    String code = "";
+                    try (InputStream error = conn.getErrorStream()) {
+                        if (error != null) code = LoomyChatRefusal.businessCode(LoomyChatRefusal.readPrefix(error), conn.getContentLengthLong());
+                    } catch (IOException ignored) { }
+                    return loomyChatRefused(out, statusCode, code, guardResult);
+                }
+                if (okStatus && statusCode < 300 && is != null && LoomyChatRefusal.isJson(conn.getContentType())) {
+                    byte[] prefix = LoomyChatRefusal.readPrefix(is);
+                    String code = LoomyChatRefusal.businessCode(prefix, conn.getContentLengthLong());
+                    if (!code.isEmpty() && !"000000".equals(code)) {
+                        is.close();
+                        return loomyChatRefused(out, statusCode, code, guardResult);
+                    }
+                    is = new java.io.SequenceInputStream(new ByteArrayInputStream(prefix), is);
+                }
+            }
 
             // ---------- 失败：把上游错误体读全，交给 retryable 判定 ----------
             if (!okStatus) {
@@ -15275,7 +15727,7 @@ public class GatewayServer extends NanoHTTPD {
     /** One candidate function's attempt: a primed stream, or the reason it must not be handed off. */
     private static final class TraeCall {
         HttpURLConnection conn; OutboundLimiter.Ticket ticket; TraeStream stream; TraeUsage usage;
-        int status; String body; boolean retry; TraeProtocol.UpstreamError error;
+        int status, upstreamHttp; String code, body; boolean retry; TraeProtocol.UpstreamError error;
     }
     private void traeRelease(TraeCall call,RequestContext req,boolean closeStream) {
         if(call==null) return;
@@ -15294,8 +15746,13 @@ public class GatewayServer extends NanoHTTPD {
                               RequestContext req,Attempt out) throws Exception {
         TraeCall call=new TraeCall();
         try {
-            JSONObject body=TraeProtocol.request(payload,function,meta.optString("modelName"),meta.optInt("maxOutput",0),sid,meta.optBoolean("multimodal",false),levels,
-                    meta.optString("base",""),meta.optInt("contextWindow",0),meta.optBoolean("maxMode",false));
+            boolean maxMode = meta.optBoolean("maxMode", false);
+            boolean useCatalogDetail = maxMode || function.equals(meta.optString("function"));
+            String modelName = useCatalogDetail ? meta.optString("modelName") : "";
+            int catalogOutputLimit = useCatalogDetail ? meta.optInt("maxOutput", 0) : 0;
+            JSONObject body = TraeProtocol.request(payload, function, modelName, catalogOutputLimit, sid,
+                    meta.optBoolean("multimodal", false), levels, meta.optString("base", ""),
+                    meta.optInt("contextWindow", 0), maxMode);
             // Protocol validation is complete before admission, connection, or any upstream bytes.
             call.ticket=admitOutbound(target,req);
             JSONObject now=traeControl().lease(account.optString("id"),req);
@@ -15311,11 +15768,12 @@ public class GatewayServer extends NanoHTTPD {
             UsageLedger.Row row=U_ROW.get(); if(row!=null) {row.outboundAt=System.currentTimeMillis();row.ep="subscription";} RequestDiagnostics.handoff(row);
             try(OutputStream os=call.conn.getOutputStream()){os.write(bytes);}
             int status=call.conn.getResponseCode();
+            call.upstreamHttp=status;
             if(status<200 || status>=300) {
                 // failure(): a rejection that names sign-out or quota is answered as 401 or 429, not as the
                 // 400 that carried it, and a status that is not an HTTP error is answered as 502.
                 TraeFailure rejected=traeFailure(status,traeBodyText(call.conn,true));
-                call.status=rejected.status; call.body=rejected.body;
+                call.status=rejected.status; call.code=rejected.code; call.body=rejected.body;
                 // Only a 400 that names one of the three codes is a rejection: the answer was never begun.
                 call.retry=status==400 && traeWrongFunction(rejected.code) && traeMayTryNext(req);
                 return call;
@@ -15327,7 +15785,7 @@ public class GatewayServer extends NanoHTTPD {
                 // answered as 502 or as the status its code names, and only a wrong-function code may ask
                 // the next candidate, because not one semantic event of this answer reached the client.
                 TraeFailure rejected=traeFailure(502,traeBodyText(call.conn,false));
-                call.status=rejected.status; call.body=rejected.body;
+                call.status=rejected.status; call.code=rejected.code; call.body=rejected.body;
                 call.retry=traeWrongFunction(rejected.code) && traeMayTryNext(req);
                 return call;
             }
@@ -15335,7 +15793,7 @@ public class GatewayServer extends NanoHTTPD {
             if("gzip".equalsIgnoreCase(encoding))input=new java.util.zip.GZIPInputStream(input);
             else if(encoding!=null && !encoding.isEmpty() && !"identity".equalsIgnoreCase(encoding))throw new IOException("unsupported response encoding");
             call.usage=new TraeUsage(row);
-            call.stream=new TraeStream(input,payload.optJSONArray("tools"),requested,req,call.usage);
+            call.stream=new TraeStream(input,payload.optJSONArray("tools"),requested,req,call.usage,body.optInt("max_tokens",0));
             // Like the upstream plugin, inspect the first semantic event before committing HTTP 200.
             try { call.stream.prime(); }
             catch(TraeProtocol.UpstreamError rejected) { call.error=rejected; call.retry=traeWrongFunction(rejected.code) && traeMayTryNext(req); }
@@ -15343,11 +15801,20 @@ public class GatewayServer extends NanoHTTPD {
         } catch(Exception e) { traeRelease(call,req,true); throw e; }
         catch(Error e) { traeRelease(call,req,true); throw e; }
     }
+    private Response traeErrorResponse(Attempt out, JSONArray rejections) {
+        if (rejections.length()==0) return errorResponse(out.status,out.body);
+        JSONObject detail = new JSONObject().put("message", out.body).put("type", "gateway_error")
+                .put("trae", new JSONObject().put("host", java.net.URI.create(TraeAuth.MODEL_HOST).getHost())
+                        .put("account_catalog_match", true).put("rejections", rejections));
+        return errorResponseWithDetail(out.status, detail);
+    }
+
     private Attempt forwardTrae(RouteTarget target,JSONObject payload,boolean stream,String requested,
                                 PrivacyMasker.Session mask,ContextGuard.Result guard) {
         Attempt out=new Attempt(); out.providerId=target.providerId; out.modelRef=target.providerId+"/"+target.upstreamModel;
         final boolean ownsContext=REQUEST_CONTEXT.get()==null;
         final RequestContext req=ownsContext?new RequestContext("trae-probe",NetworkPolicy.capture(),60000):REQUEST_CONTEXT.get(); TraeCall call=null; boolean handoff=false;
+        JSONArray rejections=new JSONArray();
         try {
             if(target.account==null) throw new IOException("account missing");
             String selectedAccount=target.account.optString("id");
@@ -15368,10 +15835,20 @@ public class GatewayServer extends NanoHTTPD {
                 // A cancelled or expired request sends no further candidate.
                 if(i>0) req.check();
                 call=traeSend(target,payload,account,meta,sid,levels,function,requested,req,out);
+                if (call.error!=null || call.stream==null) {
+                    String code=call.error==null?call.code:call.error.code;
+                    JSONObject rejection=new JSONObject().put("http_status",call.upstreamHttp);
+                    // Catalog values come from upstream. Only the fixed function names are public diagnostics.
+                    for (String known : TRAE_FUNCTIONS) {
+                        if (known.equals(function)) { rejection.put("function", known); break; }
+                    }
+                    if (code!=null && code.matches("[0-9]{1,32}")) rejection.put("code",code);
+                    rejections.put(rejection);
+                }
                 boolean more=i+1<functions.size();
                 if(call.retry && more) { traeRelease(call,req,true); call=null; continue; }
                 if(call.error!=null) throw call.error;
-                if(call.stream==null) { out.status=call.status;out.body=call.body;out.response=errorResponse(out.status,out.body);return out; }
+                if(call.stream==null) { out.status=call.status;out.body=call.body;out.response=traeErrorResponse(out,rejections);return out; }
                 call.usage.serve();
                 traeServedFunction().put(account.optString("id"),function);
                 if(stream) {
@@ -15408,7 +15885,7 @@ public class GatewayServer extends NanoHTTPD {
             if(!out.sent && detail!=null && detail.startsWith("Trae protocol:"))out.body="Trae 本地请求校验失败："+detail.replaceAll("[^A-Za-z0-9 _.,:()/-]","?").substring(0,Math.min(180,detail.length()));
             else out.body=out.sent?"Trae response incomplete or execution outcome unknown; request was not replayed":"Trae request unsupported or account unavailable; synchronize models or sign in again";
         } finally {if(!handoff){traeRelease(call,req,true);if(ownsContext)req.close();}}
-        out.response=errorResponse(out.status,out.body);if(out.retryAfter!=null)out.response.addHeader("Retry-After",out.retryAfter);return out;
+        out.response=traeErrorResponse(out,rejections);if(out.retryAfter!=null)out.response.addHeader("Retry-After",out.retryAfter);return out;
     }
 
     private CatPawAuth.CatalogConnectionFactory catPawCatalogForTests;
@@ -15449,10 +15926,21 @@ public class GatewayServer extends NanoHTTPD {
                 if(value instanceof Number) { double d=((Number)value).doubleValue();
                     if(Double.isFinite(d) && d>0 && d<=Integer.MAX_VALUE && d==Math.rint(d)) trustedType=(int)d; }
             }
-            if(clientWantsStream && (tools==null || tools.length()==0)) {
+            Object toolChoice = payload.opt("tool_choice");
+            boolean canStream;
+            try {
+                canStream = clientWantsStream && !CatPawToolBridge.required(toolChoice);
+            } catch (IllegalArgumentException invalid) {
+                throw new CatPawAuth.Failure(400, null, false);
+            }
+            if (canStream) {
                 JSONArray prepared;
-                try { prepared=CatPawToolBridge.prepare(msgs,tools,payload.opt("tool_choice")); }
-                catch(Exception invalid) { throw new CatPawAuth.Failure(400,null,false); }
+                try {
+                    prepared = CatPawToolBridge.prepare(msgs, tools, toolChoice);
+                } catch (Exception invalid) {
+                    throw new CatPawAuth.Failure(400, null, false);
+                }
+                JSONArray streamTools = CatPawToolBridge.offersTools(tools, toolChoice) ? tools : null;
                 final boolean owns=REQUEST_CONTEXT.get()==null;
                 final RequestContext request=owns?new RequestContext("catpaw-probe",NetworkPolicy.capture(),120000):REQUEST_CONTEXT.get();
                 OutboundLimiter.Ticket ticket=null;CatPawStream live=null;boolean transferred=false;
@@ -15460,7 +15948,8 @@ public class GatewayServer extends NanoHTTPD {
                     ticket=admitOutbound(target,request);ticket.markSent();out.sent=true;
                     UsageLedger.Row row=U_ROW.get();if(row!=null){row.outboundAt=System.currentTimeMillis();row.ep="subscription";}RequestDiagnostics.handoff(row);
                     CatPawStream.Transport transport=catPawStreamForTests!=null?catPawStreamForTests:catPawTransportForTests!=null?CatPawStream.legacy(catPawTransportForTests):CatPawStream.HTTP;
-                    live=CatPawStream.open(token,target.upstreamModel,prepared,trustedType,requestedModel,request,transport);
+                    live = CatPawStream.open(token, target.upstreamModel, prepared, trustedType, requestedModel,
+                            request, transport, streamTools, toolChoice, maskSession);
                     Response response=wantsAnthropicOut()?streamForwardAnthropicResponse(live,requestedModel,maskSession,guardResult,null):streamForwardResponse(live,maskSession,guardResult,null,out.modelRef);
                     final CatPawStream heldStream=live;final OutboundLimiter.Ticket heldTicket=ticket;
                     final java.util.concurrent.atomic.AtomicBoolean released=new java.util.concurrent.atomic.AtomicBoolean();
@@ -15475,12 +15964,7 @@ public class GatewayServer extends NanoHTTPD {
             res.put("reasoning",PrivacyMasker.unmaskText(res.optString("reasoning", ""),maskSession));
             String finalText=res.optString("text", ""), finalReason=res.optString("reasoning", "");
             JSONArray calls=res.optJSONArray("tool_calls");
-            // Arguments are JSON encoded inside a string: unmask their values before serializing again.
-            for(int i=0;calls!=null && i<calls.length();i++) {
-                JSONObject f=calls.getJSONObject(i).getJSONObject("function");
-                JSONObject args=new JSONObject(f.getString("arguments"));
-                unmaskJson(args,maskSession); f.put("arguments",args.toString());
-            }
+            CatPawToolBridge.unmaskArguments(calls, maskSession);
             out.textOut=finalText; out.reasoningOut=finalReason;
             long created=System.currentTimeMillis()/1000L; String id="chatcmpl-"+System.currentTimeMillis();
             JSONObject msg=new JSONObject().put("role","assistant");
@@ -16169,13 +16653,11 @@ public class GatewayServer extends NanoHTTPD {
     }
 
     private Response errorResponse(int code, String msg) {
-        JSONObject err = new JSONObject();
-        try {
-            JSONObject detail = new JSONObject();
-            detail.put("message", msg);
-            detail.put("type", "gateway_error");
-            err.put("error", detail);
-        } catch (Exception ignored) {}
+        return errorResponseWithDetail(code, new JSONObject().put("message", msg).put("type", "gateway_error"));
+    }
+
+    private Response errorResponseWithDetail(int code, JSONObject detail) {
+        JSONObject err = new JSONObject().put("error", detail);
         Response.IStatus status = Status.lookup(code);
         if (status == null && code >= 400 && code <= 599) {
             final int responseCode = code;
@@ -17292,7 +17774,7 @@ public class GatewayServer extends NanoHTTPD {
         return candidate;
     }
 
-    private static Object unmaskJson(Object value, PrivacyMasker.Session mask) throws Exception {
+    static Object unmaskJson(Object value, PrivacyMasker.Session mask) throws Exception {
         if(value instanceof String) return PrivacyMasker.unmaskText((String)value,mask);
         if(value instanceof JSONObject) {
             JSONObject object=(JSONObject)value; java.util.Iterator<String> keys=object.keys();
@@ -17657,6 +18139,18 @@ public class GatewayServer extends NanoHTTPD {
         return safeUpstreamErrorJson(body, target);
     }
 
+    private Attempt loomyChatRefused(Attempt out, int upstreamStatus, String code, ContextGuard.Result guard) {
+        boolean expired = LoomyChatRefusal.expired(code);
+        out.status = expired ? 401 : 502;
+        out.stopFallback = !expired;
+        JSONObject detail = LoomyChatRefusal.errorDetail(upstreamStatus, code);
+        out.body = new JSONObject().put("error", detail).toString();
+        out.response = errorResponseWithDetail(out.status, detail);
+        out.response.addHeader("x-magpie-sign-in", expired ? "expired" : "kept");
+        applyGuardHeaders(out.response, guard);
+        return out;
+    }
+
     private void setEnvelopeError(Attempt out, RouteTarget target, ZhipuEnvelope.Result envelope,
                                   PrivacyMasker.Session mask, ContextGuard.Result guard) {
         out.status = envelope.status;
@@ -17835,6 +18329,7 @@ public class GatewayServer extends NanoHTTPD {
         out.modelRef = target.providerId + "/" + target.upstreamModel;
         HttpURLConnection conn = null;
         boolean streamHandedOff = false;
+        String codexPhase = "account_binding";
         try {
             JSONObject acc = target.account;
             CodexAuth.SignInInfo info = new CodexAuth.SignInInfo();
@@ -17853,9 +18348,11 @@ public class GatewayServer extends NanoHTTPD {
             }
 
             if (info.expiresAt > 0 && (info.expiresAt - System.currentTimeMillis() < 5 * 60 * 1000L) && !info.refreshToken.isEmpty()) {
+                codexPhase = "credential_refresh";
                 CodexAuth.refreshToken(info, "proactive_expiry");
             }
 
+            codexPhase = "request_shape";
             String upstreamModel = target.upstreamModel != null ? target.upstreamModel : requestedModel;
             if (upstreamModel.contains("/")) {
                 upstreamModel = upstreamModel.substring(upstreamModel.lastIndexOf('/') + 1);
@@ -17903,7 +18400,9 @@ public class GatewayServer extends NanoHTTPD {
                     out.body="Request cancelled before Codex dispatch"; out.response=errorResponse(503,out.body); return out;
                 }
             }
+            codexPhase = "open_connection";
             conn = openVendorConnection(CodexAuth.CODEX_RESPONSES);
+            codexPhase = "request_headers";
             conn.setRequestMethod("POST");
             conn.setDoOutput(true);
             conn.setConnectTimeout(30000);
@@ -17926,6 +18425,7 @@ public class GatewayServer extends NanoHTTPD {
 
             byte[] outboundBytes=respReq.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
             conn.setFixedLengthStreamingMode(outboundBytes.length);
+            codexPhase = "send_body";
             OutputStream os = conn.getOutputStream();
             // Once writing starts, a partial write or missing response cannot prove non-execution.
             out.sent=true;
@@ -17934,8 +18434,10 @@ public class GatewayServer extends NanoHTTPD {
             os.flush();
             os.close();
 
+            codexPhase = "read_status";
             int statusCode = conn.getResponseCode();
             if (statusCode == 401 && attempt < 1 && !info.refreshToken.isEmpty()) {
+                codexPhase = "refresh_after_401";
                 conn.disconnect();
                 CodexAuth.refreshToken(info, "unauthorized_recovery");
                 if (attempt < 1) {
@@ -17948,6 +18450,7 @@ public class GatewayServer extends NanoHTTPD {
                 return out;
             }
 
+            codexPhase = "read_response";
             boolean okStatus = statusCode >= 200 && statusCode < 400;
             InputStream is = okStatus ? conn.getInputStream() : conn.getErrorStream();
             if (!okStatus) {
@@ -17995,6 +18498,7 @@ public class GatewayServer extends NanoHTTPD {
             out.ok = true;
             out.status = 200;
 
+            codexPhase = "decode_response";
             if (nativeResponses) {
                 Response nativeResp=codexNativeResponse(is,clientWantsStream,maskSession,guardResult,conn);
                 RESP_NATIVE_RESULT.set(Boolean.TRUE); out.response=nativeResp; streamHandedOff=clientWantsStream; return out;
@@ -18070,13 +18574,26 @@ public class GatewayServer extends NanoHTTPD {
             if(conn!=null && REQUEST_CONTEXT.get()!=null) REQUEST_CONTEXT.get().detach(conn);
             out.ok = false;
             out.status = 502;
-            out.body = "Codex upstream failed";
+            out.body = "Codex upstream failed [" + codexPhase + "] (" + codexFailureTypes(e) + ")";
+            try { android.util.Log.w("Magpie",out.body); } catch(Throwable ignored) {}
             out.response = errorResponse(502, out.body);
             return out;
         } finally {
             if(!streamHandedOff && conn!=null) try { conn.disconnect(); } catch(Throwable ignored) {}
             if(!streamHandedOff && conn!=null && REQUEST_CONTEXT.get()!=null) REQUEST_CONTEXT.get().detach(conn);
         }
+    }
+
+    /** Diagnostic types only: no exception messages, account IDs, URLs, keys or request bodies. */
+    private static String codexFailureTypes(Throwable failure) {
+        StringBuilder result=new StringBuilder();
+        for(int i=0;i<4&&failure!=null;i++){
+            if(result.length()>0)result.append(" -> ");
+            String name=failure.getClass().getSimpleName().replaceAll("[^A-Za-z0-9_$]","");
+            result.append(name.isEmpty()?"Exception":name);
+            Throwable next=failure.getCause();if(next==failure)break;failure=next;
+        }
+        return result.toString();
     }
 
     private InputStream convertResponsesToOpenAiStream(final InputStream responsesIs, final String model) {

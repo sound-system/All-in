@@ -210,13 +210,27 @@ public final class TraeProtocol {
         flush(out,pending);
         String config=maxMode?requiredString(baseModel,"Max base model"):model;
         JSONObject body=new JSONObject().put("messages",out).put("function",function).put("config_name",config).put("model",config).put("stream",true).put("request_id",UUID.randomUUID().toString()).put("session_id",session==null||session.isEmpty()?UUID.randomUUID().toString():session);if(modelName!=null&&!modelName.isEmpty())body.put("model_name",modelName);
-        Object mt=openai.has("max_completion_tokens")?openai.opt("max_completion_tokens"):openai.opt("max_tokens");int budget=0;if(mt!=null){if(!(mt instanceof Number)||!Double.isFinite(((Number)mt).doubleValue())||((Number)mt).doubleValue()!=Math.rint(((Number)mt).doubleValue())||((Number)mt).doubleValue()<1||((Number)mt).doubleValue()>Integer.MAX_VALUE)throw bad("invalid output limit");budget=((Number)mt).intValue();}if(maxMode&&budget==0&&maxOutput>0)budget=maxOutput;if(budget>0)body.put("max_tokens",maxOutput>0?Math.min(budget,maxOutput):budget);if(maxMode&&maxWindow>0){if(!body.has("max_tokens")&&maxOutput>0)body.put("max_tokens",maxOutput);int effective=body.optInt("max_tokens",0);body.put("user_message_context",new JSONObject().put("model_info",new JSONObject().put("prompt_max_tokens",Math.max(0,maxWindow-effective))));}if(openai.opt("temperature") instanceof Number)body.put("temperature",openai.get("temperature"));
+        // Trae 0.2.45 sends the catalog's output budget in normal mode too.
+        // The client's explicit smaller budget and Max-only context metadata stay intact.
+        Object mt=openai.has("max_completion_tokens")?openai.opt("max_completion_tokens"):openai.opt("max_tokens");int budget=0;if(mt!=null){if(!(mt instanceof Number)||!Double.isFinite(((Number)mt).doubleValue())||((Number)mt).doubleValue()!=Math.rint(((Number)mt).doubleValue())||((Number)mt).doubleValue()<1||((Number)mt).doubleValue()>Integer.MAX_VALUE)throw bad("invalid output limit");budget=((Number)mt).intValue();}if(budget==0&&maxOutput>0)budget=maxOutput;if(budget>0)body.put("max_tokens",maxOutput>0?Math.min(budget,maxOutput):budget);if(maxMode&&maxWindow>0){if(!body.has("max_tokens")&&maxOutput>0)body.put("max_tokens",maxOutput);int effective=body.optInt("max_tokens",0);body.put("user_message_context",new JSONObject().put("model_info",new JSONObject().put("prompt_max_tokens",Math.max(0,maxWindow-effective))));}if(openai.opt("temperature") instanceof Number)body.put("temperature",openai.get("temperature"));
         JSONArray tools=openai.optJSONArray("tools");Object choice=openai.opt("tool_choice");if(choice!=null&&choice!=JSONObject.NULL&&!(choice instanceof JSONObject)&&(!(choice instanceof String)||!Arrays.asList("none","auto","required").contains(choice)))throw bad("invalid tool choice");if(choice==JSONObject.NULL)throw bad("invalid tool choice");if((tools==null||tools.length()==0)&&choice!=null&&!"none".equals(choice)&&!"auto".equals(choice))throw bad("tool choice requires tools");if((tools==null||tools.length()==0)&&openai.has("parallel_tool_calls"))throw bad("parallel_tool_calls requires tools");if(tools!=null)for(int i=0;i<tools.length();i++)validateTool(tools.getJSONObject(i));if(tools!=null&&tools.length()>0&&!"none".equals(choice)){JSONArray nt=new JSONArray();Set<String> names=new HashSet<>();for(int i=0;i<tools.length();i++){JSONObject tool=tools.getJSONObject(i),f=tool.optJSONObject("function");if(f==null)throw bad("missing tool function");String name=required(f,"name");if(!names.add(name))throw bad("duplicate tool name");Object schema=f.opt("parameters");String text=schema==null?"{}":schema instanceof String?(String)schema:schema.toString();JSONObject obj=strictObject(text);if((model+" "+modelName).toLowerCase(Locale.ROOT).matches(".*(kimi|moonshot).*")){kimi(obj);text=obj.toString();}nt.put(new JSONObject().put("type","function").put("function",new JSONObject().put("name",name).put("description",f.optString("description","")).put("parameters",text)));}body.put("tools",nt);if(choice instanceof String)body.put("tool_choice",choice);else if(choice instanceof JSONObject){JSONObject select=(JSONObject)choice;fields(select,"type","function");functionType(select,true);JSONObject f=select.optJSONObject("function");if(f==null)throw bad("invalid tool choice");fields(f,"name");String name=required(f,"name");if(!names.contains(name))throw bad("unknown tool choice");body.put("tool_choice",name);}if(openai.opt("parallel_tool_calls") instanceof Boolean)body.put("parallel_tool_calls",openai.get("parallel_tool_calls"));}
         if(openai.has("reasoning_effort")&&openai.has("reasoningEffort"))throw bad("conflicting reasoning effort");
         String effortKey=openai.has("reasoning_effort")?"reasoning_effort":openai.has("reasoningEffort")?"reasoningEffort":null;
         if(effortKey!=null){Object raw=openai.opt(effortKey);if(!(raw instanceof String)||((String)raw).trim().isEmpty())throw bad("invalid reasoning effort");String effort=(String)raw, wire=null;
             if(levels!=null)for(int i=0;i<levels.length();i++){Object v=levels.opt(i);if(v instanceof String&&((String)v).equalsIgnoreCase(effort)){wire=(String)v;break;}}
-            if(wire==null){String alias=effort.equalsIgnoreCase("low")?"light":effort.equalsIgnoreCase("xhigh")?"extra_high":null;if(alias!=null&&levels!=null)for(int i=0;i<levels.length();i++){Object v=levels.opt(i);if(v instanceof String&&((String)v).equalsIgnoreCase(alias)){wire=(String)v;break;}}}
+            if (wire == null && levels != null) {
+                String alias = null;
+                if ("low".equalsIgnoreCase(effort)) alias = "light";
+                // Trae 0.2.45 offers max as an alias when extra_high is the top level.
+                else if ("xhigh".equalsIgnoreCase(effort) || "max".equalsIgnoreCase(effort)) alias = "extra_high";
+                for (int i = 0; alias != null && i < levels.length(); i++) {
+                    Object level = levels.opt(i);
+                    if (level instanceof String && alias.equalsIgnoreCase((String) level)) {
+                        wire = (String) level;
+                        break;
+                    }
+                }
+            }
             // Client defaults may name a level this model does not offer; omit it to use the model default.
             if(wire!=null)body.put("reasoning_effort",wire);
         }return body;
@@ -286,12 +300,18 @@ public final class TraeProtocol {
     }
     public static final class Decoder {
         public boolean terminal; public JSONObject usage; public String finishReason;
+        private final int outputLimit;
+        private boolean unmappedFinish;
         public String modelName(){return model;}
         public String chunkId(){return chunkId;}
         public long createdAt(){return created;}
         private final String model; private final String chunkId="chatcmpl-"+UUID.randomUUID().toString().replace("-",""); private final long created=System.currentTimeMillis()/1000L; private final Set<String> names=new LinkedHashSet<>(); private final Map<String,JSONObject> declaredProperties=new HashMap<>(); private final List<Call> calls=new ArrayList<>(); private final StringBuilder text=new StringBuilder(); private final Code quotedSoFar=new Code(); private String thought="",lastThought="";private int size; private boolean ended; private boolean afterCall;
         private static final class Call {String id="",name="",args="";Integer index;}
-        public Decoder(JSONArray tools,String model){this.model=model==null?"":model;if(tools!=null)for(int i=0;i<tools.length();i++){JSONObject t=tools.optJSONObject(i);if(t!=null){JSONObject f=t.optJSONObject("function");if(f!=null){String name=f.optString("name");if(!name.isEmpty()){names.add(name);Object schema=f.opt("parameters");if(schema instanceof String){try{schema=new JSONObject((String)schema);}catch(Exception notJson){schema=null;}}declaredProperties.put(name,schema instanceof JSONObject?((JSONObject)schema).optJSONObject("properties"):null);}}}}}
+        public Decoder(JSONArray tools,String model){this(tools,model,0);}
+        public Decoder(JSONArray tools,String model,int outputLimit){
+            if(outputLimit<0)throw new IllegalArgumentException("negative Trae output limit");
+            this.outputLimit=outputLimit;
+            this.model=model==null?"":model;if(tools!=null)for(int i=0;i<tools.length();i++){JSONObject t=tools.optJSONObject(i);if(t!=null){JSONObject f=t.optJSONObject("function");if(f!=null){String name=f.optString("name");if(!name.isEmpty()){names.add(name);Object schema=f.opt("parameters");if(schema instanceof String){try{schema=new JSONObject((String)schema);}catch(Exception notJson){schema=null;}}declaredProperties.put(name,schema instanceof JSONObject?((JSONObject)schema).optJSONObject("properties"):null);}}}}}
         private JSONObject chunk(JSONObject delta,String finish) throws Exception {return new JSONObject().put("id",chunkId).put("created",created).put("object","chat.completion.chunk").put("model",model).put("choices",new JSONArray().put(new JSONObject().put("index",0).put("delta",delta).put("finish_reason",finish==null?JSONObject.NULL:finish)));}
         private long count(JSONObject o,String... keys) throws IOException {for(String key:keys)if(o!=null&&o.has(key)&&!o.isNull(key)){Object x=o.opt(key);if(!(x instanceof Number))throw bad("invalid usage count");double n=((Number)x).doubleValue();if(!Double.isFinite(n)||n<0||n!=Math.rint(n)||n>9007199254740991d)throw bad("invalid usage count");return ((Number)x).longValue();}return 0;}
         private boolean hasCount(JSONObject o,String... keys){for(String key:keys)if(o!=null&&o.has(key)&&!o.isNull(key))return true;return false;}
@@ -323,7 +343,20 @@ public final class TraeProtocol {
         private boolean objectComplete(String s){try{strictObject(s);return true;}catch(Exception ex){return false;}}
         private String mergeArguments(String old,String next) throws IOException {if(old.isEmpty())return next;if(next.isEmpty()||old.equals(next))return old;if(next.startsWith(old))return next;if(objectComplete(old)){if(objectComplete(next))throw bad("conflicting complete argument snapshots");throw bad("arguments after complete object");}return old+next;}
         private String merge(String old,String next){if(next.isEmpty()||old.equals(next)||old.startsWith(next))return old;if(next.startsWith(old))return next;return old+next;}
-        private void finish(JSONObject d) {String f=d.optString("finish_reason",d.optString("stop_reason",d.optString("finishReason",""))).toLowerCase(Locale.ROOT);if(Arrays.asList("length","max_tokens","max_output_tokens","max_length").contains(f))finishReason="length";else if(f.equals("content_filter")||f.equals("sensitive"))finishReason="content_filter";}
+        private void finish(JSONObject d) {
+            String f=d.optString("finish_reason",d.optString("stop_reason",d.optString("finishReason",""))).toLowerCase(Locale.ROOT);
+            if(Arrays.asList("length","max_tokens","max_output_tokens","max_length").contains(f))finishReason="length";
+            else if(f.equals("content_filter")||f.equals("sensitive"))finishReason="content_filter";
+            else if(!f.isEmpty()&&!f.equals("stop"))unmappedFinish=true;
+        }
+        private String resolvedFinish() {
+            String result=finishReason==null?"stop":finishReason;
+            // Use only the actual sent limit and an explicit supplier output count.
+            // No enterprise 2000-token heuristic is applied to CN personal models.
+            long output=usage==null?0:usage.optLong("completion_tokens",0);
+            if("stop".equals(result)&&!unmappedFinish&&outputLimit>0&&output>0&&output>=outputLimit)return "length";
+            return result;
+        }
         public List<JSONObject> accept(String event,String data) throws Exception {if(terminal||ended)throw bad("event after terminal");if(data==null)data="";size+=data.length();if(data.length()>LIMIT||size>8*LIMIT)throw bad("stream buffer limit");String e=(event==null?"":event).replaceAll("([a-z0-9])([A-Z])","$1_$2").replaceAll("[^A-Za-z0-9]+","_").toLowerCase(Locale.ROOT).replaceAll("^_+|_+$","");if(data.equals("[DONE]")){List<JSONObject> result=complete();terminal=true;return result;}// Progress notices carry a bare string, not an object; they carry no answer.
         boolean auxiliary=AUXILIARY_EVENTS.contains(e);
         if(auxiliary && !data.trim().startsWith("{"))return Collections.emptyList();
@@ -557,7 +590,7 @@ public final class TraeProtocol {
             c.id="call_"+UUID.randomUUID().toString().replace("-","");c.name=name;c.args=str;calls.add(c);
         }
         private List<JSONObject> complete() throws Exception {List<JSONObject> out=new ArrayList<>();drainText(out,true);
-            Set<String> ids=new HashSet<>();JSONArray arr=new JSONArray();for(int i=0;i<calls.size();i++){Call c=calls.get(i);if(c.id.isEmpty()||c.name.trim().isEmpty()||c.args.isEmpty())throw bad("incomplete native tool call");if(!ids.add(c.id))throw bad("duplicate tool call id");if(!names.contains(c.name))throw bad("unknown tool name");strictObject(c.args);arr.put(new JSONObject().put("index",i).put("id",c.id).put("type","function").put("function",new JSONObject().put("name",c.name).put("arguments",c.args)));}if(arr.length()>0)out.add(chunk(new JSONObject().put("tool_calls",arr),null));if(arr.length()>0)finishReason="tool_calls";else if(finishReason==null)finishReason="stop";out.add(chunk(new JSONObject(),finishReason));ended=true;return out;}
+            Set<String> ids=new HashSet<>();JSONArray arr=new JSONArray();for(int i=0;i<calls.size();i++){Call c=calls.get(i);if(c.id.isEmpty()||c.name.trim().isEmpty()||c.args.isEmpty())throw bad("incomplete native tool call");if(!ids.add(c.id))throw bad("duplicate tool call id");if(!names.contains(c.name))throw bad("unknown tool name");strictObject(c.args);arr.put(new JSONObject().put("index",i).put("id",c.id).put("type","function").put("function",new JSONObject().put("name",c.name).put("arguments",c.args)));}if(arr.length()>0)out.add(chunk(new JSONObject().put("tool_calls",arr),null));if(arr.length()>0)finishReason="tool_calls";else finishReason=resolvedFinish();out.add(chunk(new JSONObject(),finishReason));ended=true;return out;}
         public List<JSONObject> end() throws Exception {if(!terminal)throw bad("stream ended without terminal event");return Collections.emptyList();}
     }
 }

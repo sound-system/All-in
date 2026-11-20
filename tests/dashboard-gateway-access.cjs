@@ -3,7 +3,7 @@ const html=fs.readFileSync('app/src/main/assets/dashboard.html','utf8');
 for(const m of html.matchAll(/<script>([\s\S]*?)<\/script>/g))new vm.Script(m[1]);
 const code=html.slice(html.indexOf('    // Gateway access inventory:'),html.indexOf('    // End gateway access inventory.'));
 function element(){return {value:'',textContent:'',disabled:false,children:[],attributes:{},animations:[],
- appendChild(n){this.children.push(n)},replaceChildren(){this.children=[]},setAttribute(k,v){this.attributes[k]=v},
+ appendChild(n){this.children.push(n)},replaceChildren(){this.children=[]},setAttribute(k,v){this.attributes[k]=v},getAttribute(k){return this.attributes[k]},
  animate(frames,options){const animation={frames,options,cancel(){this.cancelled=true}};this.animations.push(animation);return animation},
  classList:{contains(){return true}}};}
 function page(){

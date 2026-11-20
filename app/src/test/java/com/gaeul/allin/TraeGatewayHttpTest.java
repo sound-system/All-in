@@ -221,9 +221,31 @@ public final class TraeGatewayHttpTest {
             u.mode="jw200_4001";u.failFirst=5;before=u.count.get();
             Result bounded=post(g,"/v1/chat/completions",chat("trae-cn/fixture",false));
             check(bounded.status==502&&u.count.get()==before+5,"a named 200 is bounded to one pass: "+bounded.status+" "+(u.count.get()-before));
+            checkRejections(bounded,u,before,200);
+            u.mode="wrong4001";u.failFirst=5;before=u.count.get();
+            Result rejected=post(g,"/v1/chat/completions",chat("trae-cn/fixture",false));
+            check(rejected.status==400&&u.count.get()==before+5,"upstream 400 stays 400 after all candidates");
+            checkRejections(rejected,u,before,400);
+            u.mode="sse4001";u.failFirst=5;before=u.count.get();
+            Result sseRejected=post(g,"/v1/chat/completions",chat("trae-cn/fixture",true));
+            check(sseRejected.status==400&&u.count.get()==before+5,"priming rejection stays a pre-stream error");
+            checkRejections(sseRejected,u,before,200);
             u.mode="ok";u.failFirst=0;
             check(post(g,"/v1/chat/completions",chat("trae-cn/fixture",false)).status==200,"a named failure leaves no cooldown");
         }
+    }
+    private static void checkRejections(Result result, Upstream u, int first, int upstreamHttp) throws Exception {
+        JSONObject diagnostic=new JSONObject(result.body).getJSONObject("error").getJSONObject("trae");
+        check(diagnostic.getBoolean("account_catalog_match") && "trae-api-cn.mchost.guru".equals(diagnostic.getString("host")),"fixed diagnostics host and catalog match");
+        JSONArray rejected=diagnostic.getJSONArray("rejections");
+        check(rejected.length()==5,"each rejected candidate recorded once");
+        for(int i=0;i<rejected.length();i++) {
+            JSONObject item=rejected.getJSONObject(i);
+            check(wire(u,first+i).getString("function").equals(item.getString("function"))
+                    && item.getInt("http_status")==upstreamHttp && "4001".equals(item.getString("code")),"record actual rejection in order");
+        }
+        check(!result.body.contains(TOKEN) && !result.body.contains("synthetic function")
+                && !result.body.contains("fixture-uid"),"no credentials or raw upstream message");
     }
     /** A client that goes away mid-answer: Trae's connection is closed and no other candidate is asked. */
     static void cancel(Path dir,Upstream u,Upstream backup) throws Exception {
@@ -282,6 +304,16 @@ public final class TraeGatewayHttpTest {
             JSONObject first=wire(u,seenStart), second=wire(u,seenStart+1);
             check("chat_v3".equals(first.optString("function")),"the function whose list names the model goes first: "+first.optString("function"));
             check("solo_work_lite".equals(second.optString("function")),"then the site's own order: "+second.optString("function"));
+            check("fixture__dev".equals(first.optString("model_name")) && first.optInt("max_tokens") == 4096,
+                    "the catalog function sends its dev name and output limit");
+            check(!second.has("model_name") && !second.has("max_tokens"),
+                    "the alternate function does not inherit the catalog function's dev name or default limit");
+            u.failFirst=1;
+            int requestedStart=u.seen.size();
+            Result explicit=post(g,"/v1/chat/completions",chat("trae-cn/fixture",false).put("max_tokens",5000));
+            check(explicit.status==200 && u.seen.size()==requestedStart+2,"explicit limit survives the same fallback");
+            check(wire(u,requestedStart).optInt("max_tokens")==4096 && wire(u,requestedStart+1).optInt("max_tokens")==5000,
+                    "only the catalog function applies its model cap to the explicit limit");
             check(!first.optString("session_id").isEmpty()&&first.optString("session_id").equals(second.optString("session_id")),"the same conversation across candidates");
             check(first.optString("config_name").equals(second.optString("config_name"))&&first.optString("model").equals(second.optString("model")),"the same model across candidates");
             check(first.getJSONArray("messages").toString().equals(second.getJSONArray("messages").toString()),"the same messages across candidates");
@@ -333,6 +365,20 @@ public final class TraeGatewayHttpTest {
             r=post(g,"/v1/chat/completions",chat("trae-cn/fixture",true));
             check(r.status==400&&u.count.get()==before+5,"every candidate tried once, then 400: "+r.status+" "+(u.count.get()-before));
             u.mode="ok";u.failFirst=0;
+        }
+        JSONObject guarded = config(fallback).put("guard", new JSONObject().put("enabled", true).put("maxOutputTokens", 32));
+        try (Gateway g = new Gateway(guarded, Files.createDirectory(dir.resolve("functions-guarded")), u)) {
+            for (String outputField : new String[]{"", "max_tokens", "max_completion_tokens"}) {
+                u.mode = "wrong4001";
+                u.failFirst = 1;
+                int start = u.seen.size();
+                JSONObject request = chat("trae-cn/fixture", false);
+                if (!outputField.isEmpty()) request.put(outputField, 5000);
+                Result result = post(g, "/v1/chat/completions", request);
+                check(result.status == 200 && u.seen.size() == start + 2, "guarded request follows the same fallback");
+                check(wire(u, start).optInt("max_tokens") == 32 && wire(u, start + 1).optInt("max_tokens") == 32,
+                        "Guard limits both functions with " + (outputField.isEmpty() ? "no client limit" : outputField));
+            }
         }
         // A catalog function this build doesn't know is asked as the catalog said, never replaced.
         JSONObject unknown=config(fallback);

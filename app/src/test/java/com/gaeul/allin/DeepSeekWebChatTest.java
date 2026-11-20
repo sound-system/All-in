@@ -20,7 +20,40 @@ public final class DeepSeekWebChatTest {
   }
  }
  static String read(InputStream in) throws IOException { ByteArrayOutputStream b=new ByteArrayOutputStream();byte[] buf=new byte[1024];int n;while((n=in.read(buf))!=-1)b.write(buf,0,n);return b.toString("UTF-8"); }
+ static void gatewayRefusal() throws Exception {
+  String model = "deepseek_web/deepseek-chat";
+  JSONObject provider = VendorPolicyGatewayHttpTest.provider("deepseek_web", "deepseek-web", "https://example.invalid", "deepseek-chat");
+  provider.put("accounts", new JSONArray().put(MultiAccountGatewayOfflineTest.account("web-a", "a", "secret"))
+          .put(MultiAccountGatewayOfflineTest.account("web-b", "b", "secret")));
+  try (VendorPolicyGatewayHttpTest.Upstream unused = new VendorPolicyGatewayHttpTest.Upstream((r,n) -> {
+       throw new AssertionError("unexpected vendor request");
+      }); VendorPolicyGatewayHttpTest.Gateway gateway = new VendorPolicyGatewayHttpTest.Gateway(
+          VendorPolicyGatewayHttpTest.config(provider), unused, false)) {
+   for (boolean stream : new boolean[]{false, true}) {
+    java.util.concurrent.atomic.AtomicInteger completions = new java.util.concurrent.atomic.AtomicInteger();
+    gateway.gateway.setDeepSeekTransportForTests(new Mock() {
+     public DeepSeekWeb.Response request(String method, String url, Map<String,String> headers, byte[] body) throws IOException {
+      if (url.endsWith("/completion")) {
+       completions.incrementAndGet();
+       return response(403, "application/json", "{\"code\":0,\"data\":{\"biz_code\":47101,\"biz_msg\":\"REDACT-ME secret\"}}");
+      }
+      return super.request(method,url,headers,body);
+     }
+    });
+    VendorPolicyGatewayHttpTest.Result r = VendorPolicyGatewayHttpTest.post(gateway, "/v1/chat/completions", VendorPolicyGatewayHttpTest.body(model, stream));
+    check(r.status == (stream ? 200 : 403), "403 preserved, HTTP " + r.status);
+    String error = stream ? Arrays.stream(r.body.split("\n")).filter(line -> line.startsWith("data: ") && line.contains("permission_error"))
+            .findFirst().orElseThrow(() -> new AssertionError("missing SSE refusal")).substring(6) : r.body;
+    JSONObject detail = new JSONObject(error).getJSONObject("error");
+    check(detail.getInt("upstream_status") == 403 && "47101".equals(detail.optString("upstream_business_code")), "safe refusal details");
+    check("permission_error".equals(detail.optString("type")) && !r.body.contains("REDACT-ME") && !r.body.contains("secret"), "redacted refusal");
+    check(!r.body.contains("[DONE]") && completions.get() == 1 && unused.requests.isEmpty(), "single completion, no successful end or failover");
+   }
+  }
+ }
+
  public static void main(String[] args) throws Exception {
+  gatewayRefusal();
   JSONObject req=new JSONObject("{\"model\":\"deepseek-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
   NetworkPolicy.Snapshot previous=NetworkPolicy.current();
   NetworkPolicy.Snapshot policyA=NetworkPolicy.parse(new JSONObject().put("mode","direct"));
@@ -50,7 +83,7 @@ public final class DeepSeekWebChatTest {
   CountDownLatch done=new CountDownLatch(1); final CountDownLatch completed=done; boolean[] success={false}; InputStream in=new DeepSeekWebChat("secret",fake).stream(req,"alias",(ok,status,err)->{success[0]=ok;completed.countDown();});String data=read(in);check(done.await(2,TimeUnit.SECONDS)&&success[0]&&data.contains("hello")&&data.contains("[DONE]")&&!data.contains("secret"),"stream success");in.close();
   fake.fail=true;done=new CountDownLatch(1);final CountDownLatch failed=done;final boolean[] ok={true};in=new DeepSeekWebChat("secret",fake).stream(req,"alias",(v,status,e)->{ok[0]=v;failed.countDown();});data=read(in);check(done.await(2,TimeUnit.SECONDS)&&!ok[0]&&data.contains("upstream_error")&&!data.contains("[DONE]")&&!data.contains("secret")&&!data.contains("upstream-body"),"stream error");in.close();
   for(int upstream:new int[]{401,403,429,500}) {
-   final int code=upstream; final int expected=(code==401||code==403)?401:code==429?429:502;
+   final int code=upstream; final int expected=(code==401||code==403||code==429)?code:502;
    Mock failing=new Mock(){public DeepSeekWeb.Response request(String method,String url,Map<String,String> h,byte[] body) throws IOException {if(url.endsWith("/completion"))return response(code,"application/json","secret upstream-body");return super.request(method,url,h,body);}};
    CountDownLatch recorded=new CountDownLatch(1);int[] status={0};String[] error={null};
    in=new DeepSeekWebChat("secret",failing).stream(req,"alias",(v,st,e)->{status[0]=st;error[0]=e;recorded.countDown();});data=read(in);

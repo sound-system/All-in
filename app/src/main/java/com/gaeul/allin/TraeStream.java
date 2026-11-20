@@ -21,10 +21,14 @@ public final class TraeStream extends InputStream {
     private int held = -1;
 
     public TraeStream(InputStream upstream, JSONArray tools, String model, RequestContext request, UsageSink sink) {
+        this(upstream,tools,model,request,sink,0);
+    }
+    /** outputLimit is the final wire max_tokens, after client/model budget clipping. */
+    public TraeStream(InputStream upstream, JSONArray tools, String model, RequestContext request, UsageSink sink, int outputLimit) {
         if (upstream == null) throw new IllegalArgumentException("upstream");
         reader = new InputStreamReader(upstream, StandardCharsets.UTF_8.newDecoder()
                 .onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT));
-        decoder = new TraeProtocol.Decoder(tools, model);
+        decoder = new TraeProtocol.Decoder(tools, model, outputLimit);
         this.request = request; this.sink = sink;
     }
     private void check() throws IOException { if (request != null) request.check(); }

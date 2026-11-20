@@ -15,8 +15,8 @@ android {
         applicationId 'com.gaeul.allin'
         minSdk 24
         targetSdk 34
-        versionCode 77
-        versionName '1.2.71'
+        versionCode 96
+        versionName '1.2.90-test'
         testInstrumentationRunner 'com.gaeul.allin.RepairInstrumentation'
     }
 
@@ -104,8 +104,11 @@ def offlineTestMains = [
         'com.gaeul.allin.CatPawIncrementalHttpTest',
         'com.gaeul.allin.CatPawAccountStatusHttpTest',
         'com.gaeul.allin.ProviderUpstreamParityOfflineTest',
+        'com.gaeul.allin.ProviderAlignmentRegressionTest',
+        'com.gaeul.allin.ProviderAlignmentGatewayHttpTest',
         'com.gaeul.allin.CheckinProofRegressionTest',
         'com.gaeul.allin.CheckinStatusRegressionTest',
+        'com.gaeul.allin.QoderDailyStatusRegressionTest',
         'com.gaeul.allin.CheckinGatewayRegressionTest',
         'com.gaeul.allin.CheckinCenterRegressionTest',
         'com.gaeul.allin.WorkBuddyCheckinRegressionTest',
@@ -148,6 +151,7 @@ def offlineTestMains = [
         'com.gaeul.allin.CatPawMiniGatewayHttpTest',
         'com.gaeul.allin.CatPawToolBridgeOfflineTest',
         'com.gaeul.allin.WorkBuddyCompletionGatewayHttpTest',
+        'com.gaeul.allin.WorkBuddyToolRoundTripGatewayHttpTest',
         'com.gaeul.allin.CompletionStatusGatewayHttpTest',
         'com.gaeul.allin.CompletionBudgetOfflineTest',
         'com.gaeul.allin.ZCodeBoundaryGatewayHttpTest',
@@ -181,6 +185,8 @@ def offlineTestMains = [
         'com.gaeul.allin.ProviderRetryPolicyOfflineTest',
         'com.gaeul.allin.CodexRefreshOfflineTest',
         'com.gaeul.allin.CodexRequestPolicyOfflineTest',
+        'com.gaeul.allin.CodexFailureDiagnosticsOfflineTest',
+        'com.gaeul.allin.CodexHttp1OfflineTest',
         'com.gaeul.allin.CodexPersistenceOfflineTest',
         'com.gaeul.allin.CodexApiKeyPoolHttpTest',
         'com.gaeul.allin.CatPawPolicyOfflineTest',
@@ -275,6 +281,8 @@ def offlineTestMains = [
         'com.gaeul.allin.MiniMaxLifecycleOfflineTest',
         'com.gaeul.allin.MiniMaxRefreshJournalOfflineTest',
         'com.gaeul.allin.MiniMaxIntegrationHttpTest',
+        'com.gaeul.allin.MiniMaxMediaGatewayHttpTest',
+        'com.gaeul.allin.CodexImagesGatewayHttpTest',
         'com.gaeul.allin.MiniMaxUnknownHttpTest',
         'com.gaeul.allin.MiniMaxCompetitionTest',
         'com.gaeul.allin.SessionAffinityOfflineTest',

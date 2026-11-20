@@ -100,6 +100,10 @@ public class TraeProtocolOfflineTest {
   TraeProtocol.Decoder lateError=new TraeProtocol.Decoder(tools,"m");check(lateError.accept("output","{\"response\":\"hello\"}").size()==1);fails(()->lateError.accept("error","{\"code\":1,\"message\":\"bad\"}"));
   JSONArray levels=new JSONArray("[\"light\",\"high\",\"extra_high\"]");
   for(String[] pair:new String[][]{{"low","light"},{"light","light"},{"xhigh","extra_high"},{"extra_high","extra_high"},{"high","high"}}){JSONObject r=new JSONObject(base.toString()).put("reasoning_effort",pair[0]);check(TraeProtocol.request(r,"chat","m",100,"s",false,levels).getString("reasoning_effort").equals(pair[1]));}
+  JSONObject maxEffort = new JSONObject(base.toString()).put("reasoning_effort", "max");
+  check("extra_high".equals(TraeProtocol.request(maxEffort,"chat","m",100,"s",false,levels).optString("reasoning_effort")));
+  check("max".equals(TraeProtocol.request(maxEffort,"chat","m",100,"s",false,new JSONArray("[\"extra_high\",\"max\"]")).optString("reasoning_effort")));
+  check(!TraeProtocol.request(maxEffort,"chat","m",100,"s",false,new JSONArray("[\"light\",\"high\"]")).has("reasoning_effort"));
   // Eta defaults to medium even when the selected model only offers light/high.
   for(String key:new String[]{"reasoning_effort","reasoningEffort"}) {
    for(JSONArray supported:new JSONArray[]{new JSONArray("[\"light\",\"high\"]"),new JSONArray(),null}) {
