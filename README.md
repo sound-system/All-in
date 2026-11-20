@@ -1,171 +1,107 @@
 # All In
 
+**让 Android 手机运行 AI 网关，让电脑和手机上的客户端共用一个 API 地址。**
 
-**把 Android 手机变成随身 AI 网关。**
+All In 在 Android 设备上运行 HTTP 服务。你在手机上配置供应商账号和 API Key，客户端用 All In 的网关口令访问模型。换账号、调整路由或限制可用模型，都可以在 All In 的面板里完成。推理请求由手机转发给所选供应商，模型在供应商侧运行。
 
-All In 将不同供应商的账号、API 密钥和模型集中到一个本地服务中，让手机、电脑和其他兼容客户端通过统一接口访问。你可以在手机上管理供应商、配置路由和查看用量，也可以让客户端继续使用熟悉的 OpenAI 或 Anthropic 接口。
+[下载 APK](https://github.com/xunianooo/All-in/releases/latest) · [查看更新记录](https://github.com/xunianooo/All-in/releases) · [反馈问题](https://github.com/xunianooo/All-in/issues)
 
-项目由 [Gaeul](https://github.com/xunianooo) 开发。All In 参考并移植了 Magpie 和社区插件的部分设计与实现；感谢原项目及各位贡献者，详见下方[致谢](#致谢)。
+当前正式版为 **All In 1.2.90（构建 96）**，APK 和标签保留 `1.2.90-test` 命名。[1.2.90 更新说明](docs/RELEASE_1.2.90-test.md)
 
-> 当前正式版为 **All In 1.2.90（96）**，修复网关口令回读和状态同步，扩展图片与视频接入，改善工具调用及上游诊断。详见[更新日志](docs/RELEASE_1.2.90-test.md)和[正式版下载](https://github.com/xunianooo/All-in/releases/tag/v1.2.90-test)。
+## 快速开始
 
-> 上一轮已发布 **All In 1.2.52 正式版**（包内 1.2.52-test / 58），见[发行页](https://github.com/xunianooo/All-in/releases/tag/v1.2.52-test)。供应商服务、客户端协议和系统后台策略可能变化；兼容与测试边界见该轮说明。
+1. 从 Releases 下载 APK，安装到 **Android 7.0（API 24）及以上**的设备。从旧版升级时，可以用同签名 APK 直接覆盖安装，保留账号和配置。
+2. 打开 All In，按向导完成设置并启动网关。在「供应商」里登录支持的账号或添加 API Key，再查看该账号可用的模型。
+3. 在面板复制 API 地址和网关口令，填入客户端。选一个面板或模型目录中实际存在的模型发起请求。
 
-> 55版修复账户名称辨认、全清失效、镜像凭据残留与删除后刷新问题，支持账号备注与明确的移除确认，详见 [55版正式发布说明](docs/RELEASE_1.2.49-test.md)。
+| 客户端位置 | OpenAI 兼容 Base URL | Anthropic 服务根地址 |
+| --- | --- | --- |
+| 与 All In 位于同一部手机 | `http://127.0.0.1:3425/v1` | `http://127.0.0.1:3425` |
+| 同一局域网中的电脑或其他设备 | `http://<手机局域网 IP>:3425/v1` | `http://<手机局域网 IP>:3425` |
 
-> 50版包含首页更新入口、现代更新弹窗、9小时检查与手动检查，并整合配置一致性、对象Key路由、响应完整性和流式取消修补。新增范围与验证边界见 [50版正式发布说明](docs/RELEASE_1.2.44-test.md)，完整配置revision契约见 [48版说明](docs/RELEASE_1.2.42-test.md)。
+`3425` 是默认端口。Anthropic 客户端应最终请求 `/v1/messages`，Base URL 的填写方式以客户端设置为准。客户端使用 **All In 网关口令**，供应商凭据留在 All In 中。局域网访问时，以面板显示的地址和实际监听范围为准。
 
-52版统一模型候选白名单筛选、搜索和分页，并包含51的模型列表非阻塞修复，见 [52版正式发布说明](docs/RELEASE_1.2.46-test.md)。
+### 用 curl 验证
 
-53版修补流式读取、用量账本、凭据日志、模型ID、账号发送边界与连接期限。该轮变更与验证范围见 [1.2.47 正式版发布说明](docs/RELEASE_1.2.47-test.md)，账号文件功能见 [JSON 迁移说明](docs/ACCOUNT_JSON_TRANSFER.md)。
-
-**All In 1.2.48 正式版（54）** 在53版基础上复核并修补后续审查问题，见 [1.2.48 正式版说明](docs/RELEASE_1.2.48-test.md)。DNS 四槽与总连接期限只覆盖 `NetworkPolicy.connectTunnel` 原始 Socket 路径；`HttpURLConnection / openHttp` 仍使用平台 DNS，不受该四槽保护。平台 DNS 不响应中断时会继续占用原槽，网关不会无限增线程；管理状态接口的 `connections.outboundDns` 提供活动槽、饱和、超时和拒绝计数。
-
-> 本版本保留账号 JSON 文件导入/导出、签到、限流、供应商适配及流式能力。安装包、源码、更新清单与校验文件见 [1.2.90 正式版发布页](https://github.com/xunianooo/All-in/releases/tag/v1.2.90-test)。保留原证书，可从旧版覆盖升级；请勿卸载或清除应用数据。
-
-## All In 能做什么
-
-- **统一接入**：提供 OpenAI Chat Completions、Responses 和 Anthropic Messages 兼容入口，按供应商和接口能力处理请求与响应。
-- **供应商与账号管理**：通过手机面板登录支持的账号、配置 API Key、查看模型目录和调整供应商状态。
-- **路由与模型管理**：配置路由组、候选目标和模型白名单；可按需要启用近期用量优先等策略。
-- **用量与诊断**：查看请求记录、用量与连接状态，并区分已知、部分已知、估算和未知的用量信息。
-- **请求保护**：提供上下文预算、隐私脱敏、出站网络配置、限流和取消等能力。对于执行结果未知的请求，部分路径会保守停止，避免盲目重放。
-- **维护工具**：提供配置备份与恢复、供应商端点探测和签名兼容规则更新。
-- **手机后台运行**：通过前台服务和保活机制维持网关；实际运行效果仍取决于 Android 版本及设备厂商的后台限制。
-
-不同供应商和模型对图片、工具调用、流式输出及特定协议字段的支持不同；统一入口不代表所有功能都可以无损互转。
-
-## 支持的供应商
-
-仓库默认配置中已接入或提供适配的供应商包括：
-
-- **账号与订阅类**：ZCode、WorkBuddy、Trae CN、CatPaw、小浣熊 Raccoon、Qoder CN、Cline、Codex、Antigravity、GitHub Copilot、MiniMax Code、DeepSeek 网页版。
-- **API Key 或其他配置方式**：WorkBuddy AI、Loomy、DeepSeek、SiliconFlow、OpenAI、Anthropic、OpenRouter、腾讯混元。
-
-登录方式、模型、可用功能和额度由对应供应商决定。部分适配依赖网页或社区协议，可能随上游更新而失效；Loomy 支持手机验证码登录与已有会话凭据；不同供应商的登录入口以面板实际支持为准。请以应用内提示和供应商实际状态为准。
-
-默认配置还包含 AgentMore、文心网页、Meoo、Runable、当贝和 Tabbit 的占位入口。这些入口不代表已经完成推理协议接入。
-
-## 开始使用
-
-### 1. 安装并完成设置
-
-1. 从项目 Releases 获取合适的 APK，或按下方说明自行构建并签名。
-2. 安装并打开 All In，按照向导检查权限、网关口令和服务状态。
-3. 在「供应商」中添加 API Key 或使用对应的登录方式，再同步或选择需要的模型。
-4. 按需要在「路由」和「治理」中配置路由组、模型暴露范围及其他策略。
-
-
-### 2. 连接客户端
-
-默认网关端口为 `3425`。实际地址、口令和监听状态可在应用面板查看：
-
-| 客户端位置 | 地址示例 |
-| --- | --- |
-| 与 All In 位于同一手机 | `http://127.0.0.1:3425/v1` |
-| 同一局域网内的电脑或其他设备 | `http://<手机局域网 IP>:3425/v1` |
-
-OpenAI 兼容客户端通常填写以上 `/v1` 地址；Anthropic 客户端请按客户端要求填写服务根地址并访问 `/v1/messages`。在客户端填写面板中的**网关口令**，而不是直接填写供应商账号的密钥。
-
-可用模型可通过面板或 `GET /v1/models` 查看。通常使用 `provider/model` 格式；路由组使用 `group/<组 ID>`。裸模型名兜底默认关闭，可在路由设置中按需启用。
-
-例如，在本机环境变量中设置网关口令后查询模型：
+在环境中设置 `ALLIN_API_KEY` 为面板中的网关口令。从电脑连接时，把 `127.0.0.1` 换成手机的局域网 IP。
 
 ```bash
-curl http://127.0.0.1:3425/v1/models \
+BASE_URL="http://127.0.0.1:3425/v1"
+curl -sS "$BASE_URL/models" \
   -H "Authorization: Bearer $ALLIN_API_KEY"
 ```
 
-请求示例：
+复制返回的模型 `id`，替换下例中的 `provider/model`。启用路由组后，可在目录中找到 `group/<组 ID>`。
 
 ```bash
-curl http://127.0.0.1:3425/v1/chat/completions \
+curl -sS "$BASE_URL/chat/completions" \
   -H "Authorization: Bearer $ALLIN_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"provider/model","messages":[{"role":"user","content":"你好"}]}'
 ```
 
-将示例模型名替换为应用中实际可用的模型。客户端也可使用 `x-api-key` 请求头；请避免把真实口令写进脚本、截图或公开日志。
+网关也接受 `x-api-key` 请求头。需要让电脑持续使用网关时，请保持手机的网关前台服务运行。锁屏后如果中断，可以检查通知权限、电池优化和厂商的后台管理设置。
 
-### 3. 保持网关运行
+## 供应商与账号
 
-网关运行时需要 Android 前台服务。若锁屏或切换应用后连接中断，请检查通知权限、电池优化和厂商后台限制。不同设备对后台运行的管理方式不同，应用不能保证永不被系统终止。
-
-## 接口与兼容性
-
-| 接口 | 用途 |
+| 接入方式 | 内置适配 |
 | --- | --- |
-| `GET /v1/models` | 获取可用模型目录 |
-| `POST /v1/chat/completions` | OpenAI Chat Completions 兼容入口 |
-| `POST /v1/responses` | OpenAI Responses 兼容入口 |
-| `POST /v1/messages` | Anthropic Messages 兼容入口 |
-| `POST /v1/images/generations` | 图片生成入口，具体支持取决于供应商 |
-| `POST /v1/images/edits` | MiniMax Code 参考图生成 |
-| `POST /v1/videos` | 提交 MiniMax Code 视频任务 |
-| `GET /v1/videos/{id}` | 查询视频状态 |
-| `GET /v1/videos/{id}/content` | 下载已完成的视频 |
+| 账号、订阅或会话 | ZCode、WorkBuddy、Trae CN、CatPaw、小浣熊（Raccoon）、Qoder CN、Cline、Codex、Antigravity、GitHub Copilot、MiniMax Code、DeepSeek 网页版、Loomy |
+| API Key 等配置 | WorkBuddy AI、DeepSeek API、SiliconFlow（硅基流动）、OpenAI、Anthropic、OpenRouter、腾讯混元 |
 
-MiniMax Code 国内账号可用 `minimax-code/MiniMax-Image` 生成图片。视频模型为 `minimax-code/MiniMax-H3`、`minimax-code/MiniMax-H3-Max`、`minimax-code/MiniMax-Hailuo-2.3`。参考图可用 HTTPS URL、图片 data URL 或 multipart 上传。请保留提交返回的完整视频 ID，并用相同的网关口令查询。生成使用所选 MiniMax 账号的额度。
+登录方式、模型和额度取决于账号与供应商。Loomy 支持手机验证码登录，也可使用已有会话凭据。部分适配依赖供应商网页或客户端协议，上游变更可能影响登录、模型同步或推理。面板也会显示尚未实现的占位入口，可用模型以实际同步结果为准。
 
-网关根据供应商协议处理 JSON 和 SSE 流，也支持部分工具调用与图片场景。原生协议、跨协议转换、模型能力及客户端实现之间存在差异；不支持或无法安全转换的字段可能返回错误，而不是静默丢弃。更多信息见 [Responses 协议说明](docs/responses-bridge.md)和 [Agent 字段兼容说明](docs/responses-agent-compatibility.md)。
+- **多账号管理** · 同一供应商可以管理多个账号或 API Key，按账号启停，分别查看模型或额度。账号可在 Android 应用里用 JSON 文件迁移，整机配置另有密码加密备份。[账号迁移说明](docs/ACCOUNT_JSON_TRANSFER.md)
+- **每日签到** · 签到中心显示受支持账号的状态，支持手动触发及网关运行时自动处理。奖励资格由供应商判定，ZCode 赠送通过手动入口领取。
 
-## 安全与隐私
+## 模型路由与用量
 
-- **设置自己的网关口令。** 新安装会生成随机口令；历史安装若仍使用公开默认口令，非本机推理请求会被拒绝。请在手机面板生成、复制并应用新口令，再更新电脑端配置。
-- **管理凭据与推理口令分离。** 应用管理接口使用独立管理凭据，客户端连接通常只需网关推理口令。
-- **局域网连接使用 HTTP。** 请求内容和口令在网络中不是端到端加密的；只在可信网络使用，不要直接将网关暴露到公网。
-- **保护账号和备份。** 供应商密钥、登录状态、备份文件、账本和签名私钥都应妥善保管，不要上传到公开仓库或分享给不可信的人。
-- **脱敏不是万能的。** 隐私处理依赖规则和请求形态，使用前请自行检查发送内容；兼容规则更新会验证签名，但不能代替对上游服务的判断。
-- **失败恢复有边界。** 部分供应商的一次性凭据在网络异常后可能处于结果未知状态，为避免重复使用会被保护性阻断，可能需要重新授权。
+客户端可以用 `provider/model` 指定供应商模型，也可以用 `group/<组 ID>` 请求路由组。路由组默认关闭。启用后，可为同一入口配置多个候选模型，并选择按顺序、轮流、手动指定优先项或近期用量优先。模型白名单用于控制对外可用的模型。裸模型名兜底默认关闭。
 
-使用第三方供应商时，请遵守其服务条款并留意额度及费用。All In 不提供供应商账号或免费额度，也不能保证上游服务持续可用。
+同一供应商内可选 **轮流、用量均衡、到期优先**。用量均衡优先比较可信的额度使用比例，缺少可比数据时参考本机近期 Token 与在途负载。到期优先使用供应商明确提供的额度到期或重置信息。模型权限、账号启停和冷却状态仍参与选路。[账号路由说明](docs/ACCOUNT_ROUTING.md)
 
-## 构建与测试
+「用量与治理」可查看调用记录、Token 统计和热力图。账本区分已知、部分已知、估算与未知用量。对于部分执行结果未知的请求，网关会停止自动重试，以避免重复执行或重复扣费。
 
-### 环境
+## API 与模型能力
 
-- JDK 17
-- Android SDK Platform 37.0
-- Gradle Wrapper 9.3.1、Android Gradle Plugin 9.1.1
-- Android 最低版本：API 24；target SDK：34
+| 方法和路径 | 用途 |
+| --- | --- |
+| `GET /v1/models` | 查看网关对当前客户端提供的模型及路由组 |
+| `POST /v1/chat/completions` | OpenAI Chat Completions |
+| `POST /v1/responses` | OpenAI Responses |
+| `POST /v1/messages` | Anthropic Messages |
+| `POST /v1/images/generations` | 图片生成，适配 MiniMax Code 国区、Codex 和 Loomy |
+| `POST /v1/images/edits` | MiniMax Code 国区参考图生成 |
+| `POST /v1/videos` | 提交 MiniMax Code 国区视频任务 |
+| `GET /v1/videos/{id}` | 查询视频任务 |
+| `GET /v1/videos/{id}/content` | 获取已完成的视频 |
 
-具体环境与前台服务说明见 [SDK 文档](docs/sdk.md)。配置好 Android SDK 后，在仓库根目录执行：
+文本接口按所选路径处理普通 JSON 或 SSE 流式响应。工具调用、图片输入、推理字段和其他扩展能力取决于客户端协议、上游适配与具体模型。遇到无法安全转换的字段，相关路径会返回错误。[Responses 转换说明](docs/responses-bridge.md) · [Agent 字段兼容性](docs/responses-agent-compatibility.md)
+
+Codex 生图使用 `codex/gpt-image-2`，Loomy 生图使用目录中的 `loomy/<模型 ID>`。MiniMax Code 国区生图使用 `minimax-code/MiniMax-Image`。视频可选择 `minimax-code/MiniMax-H3`、`minimax-code/MiniMax-H3-Max` 或 `minimax-code/MiniMax-Hailuo-2.3`，以面板实际目录为准。使用参考图时，可按接口提交 HTTPS URL、图片 data URL 或 multipart 文件。提交视频任务后，保留返回的完整 ID，并使用原网关口令查询或下载。媒体功能受上游账号权限、额度和频率限制。
+
+## 访问与凭据
+
+- 新安装会生成随机网关口令。旧版升级后若仍使用公开默认口令，请先在面板更换，再从其他设备连接。面板的管理接口使用独立管理凭据，推理客户端只需网关口令。
+- 网关提供 HTTP。局域网请求的内容和口令没有 TLS 加密，请在可信网络使用，避免直接将服务暴露到公网。
+- 账号 JSON 包含明文凭据。请保护这些文件及备份，提交 Issue 前先移除口令、Token、验证码、账号信息和敏感对话。
+- 上游请求受供应商的服务条款、权限、额度和计费约束。启用脱敏规则时，也请确认请求中可发送给上游的内容。
+
+## 从源码构建
+
+使用 JDK 17、Android SDK Platform 37.0 和仓库自带的 Gradle Wrapper。仓库配置为 `minSdk 24`、`targetSdk 34`、`compileSdk 37`。[SDK 配置说明](docs/sdk.md)
 
 ```bash
-# Debug APK
-./gradlew assembleDebug
-
-# JVM 离线测试
-./gradlew offlineTests
-
-# 本地 HTTP 集成测试
-./gradlew setupKeyHttpTests streamingHttpTests outboundRoutingHttpTests
+./gradlew :app:assembleDebug
+./gradlew :app:offlineTests
+./gradlew :app:setupKeyHttpTests :app:streamingHttpTests :app:outboundRoutingHttpTests
 ```
 
-Windows 使用 `gradlew.bat`。APK 产物位于 `app/build/outputs/apk/`。面板脚本使用 Node.js，具体命令可参考 [CI 工作流](.github/workflows/ci.yml)。
+Windows 使用 `gradlew.bat`。Debug APK 在 `app/build/outputs/apk/debug/`。GitHub Actions 的 Windows 与 Ubuntu CI 由维护者在 Actions 页面手动触发，另包含管理面板回归测试。Release APK 需要自行配置签名，同一应用的覆盖升级要求签名匹配。[CI 工作流](.github/workflows/ci.yml) · [签名说明](docs/RELEASE_SIGNING.md)
 
-CI 已改为**仅手动触发**，普通提交和 Pull Request 不自动运行双平台全量检查。需要时可在仓库 Actions 中选择 CI → Run workflow，保留原 Windows/Ubuntu 测试与构建能力。日常开发按改动运行相关本地回归；发布前重点验证 Android 构建、签名升级及设备表现。关闭自动触发不代表取消必要的功能与安全验证。
+## 反馈与贡献
 
-Release 构建需要自行准备签名文件，并通过 `MAGPIE_KEYSTORE`、`MAGPIE_KEYSTORE_PASS`、`MAGPIE_KEY_ALIAS` 配置；如密钥口令与仓库口令不同，可设置 `MAGPIE_KEY_PASS`。这些 `MAGPIE_` 前缀是历史兼容命名，签名密钥和口令不应提交到仓库。使用其他签名证书构建的 APK 无法直接覆盖安装原证书签名的版本。
-
-手机端也可在具备 JDK、Android SDK 和 Gradle 所需环境的 Linux 容器中构建。测试与 CI 的实际结果请查看对应提交的运行记录；1.2.23-test 的 Windows CI 曾在测试管理凭据初始化阶段失败，不能据本机测试结果宣称 Windows 已通过。
-
-## 问题反馈与贡献
-
-使用中遇到问题或有功能建议，欢迎在 [GitHub Issues](https://github.com/xunianooo/All-in/issues) 提交。请先搜索已有问题，填写应用版本、设备环境、复现步骤、预期行为和脱敏后的错误信息。用户也可以授权自己的 Agent 整理并提交 Issue；提交前请检查内容，Issue 对所有人公开，不要包含密钥、Token、验证码、私钥、个人账号或敏感对话。
-
-欢迎通过 Fork 和 Pull Request 提交代码建议。Pull Request 会进入仓库供维护者审阅；外部提交者不会因此获得直接修改主仓库的权限。
-
-## 项目结构
-
-```text
-app/src/main/java/       Android 应用、网关、协议与供应商适配
-app/src/main/assets/     管理面板、默认配置、资源与内置规则
-app/src/test/            JVM 离线测试与 HTTP 集成测试
-app/src/main/assets/licenses/  随应用提供的第三方许可
-tests/                   面板 JavaScript 测试
-docs/                    设计、兼容性与历史验收说明
-```
+欢迎提交 Issue 或 Pull Request。报告兼容性问题时，请附上 All In 版本、Android 版本、客户端及协议、供应商及模型、复现步骤和脱敏错误信息。[GitHub Issues](https://github.com/xunianooo/All-in/issues)
 
 ## 致谢
 
@@ -174,10 +110,9 @@ All In 建立在开源项目和社区分享的工作之上，感谢每一位作�
 - **[Magpie](https://github.com/yetone/magpie)**：感谢 [@yetone](https://github.com/yetone) 和 Magpie 贡献者提供的开源网关、协议处理及供应商适配思路。All In 的部分实现参考或移植自 Magpie。
 - **[magpie-community/plugins](https://github.com/magpie-community/plugins)**：感谢维护 OpenCode / Magpie 供应商插件的社区与各插件作者。项目在适配不同供应商的登录、请求和响应时，参考了社区发布的 npm 包及其源码；各插件有各自的作者和许可，请以对应项目的声明为准。
 - **DeepSeek 网页适配贡献者**：感谢相关社区作者与贡献者分享实现；随应用附带的许可文件见 [`magpie-deepseek-web-auth-MIT.txt`](app/src/main/assets/licenses/magpie-deepseek-web-auth-MIT.txt)。
-- **[NanoHTTPD](https://github.com/NanoHttpd/nanohttpd)**、**[JSON-java](https://github.com/stleary/JSON-java)**、**[Primer Octicons](https://github.com/primer/octicons)**，以及 Android、Gradle 和所有相关开源依赖的维护者。
 
 感谢所有提供反馈、测试问题和改进建议的朋友。
 
 ## 许可证
 
-本项目采用 [MIT License](LICENSE)。项目中引用、移植或分发的第三方代码和资源仍遵循其各自的版权及许可声明；随应用附带的许可文件位于 [`app/src/main/assets/licenses/`](app/src/main/assets/licenses/)。
+All In 由 [Gaeul](https://github.com/xunianooo) 开发，采用 [MIT License](LICENSE)。第三方代码与资源遵循各自许可，详见[第三方声明](docs/THIRD_PARTY_NOTICES.md)及[随应用分发的许可](app/src/main/assets/licenses/)。
