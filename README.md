@@ -8,6 +8,37 @@ All In 在 Android 设备上运行 HTTP 服务。你在手机上配置供应商�
 
 当前正式版为 **All In 1.2.90（构建 96）**，APK 和标签保留 `1.2.90-test` 命名。[1.2.90 更新说明](docs/RELEASE_1.2.90-test.md)
 
+## 长什么样
+
+不搞玄学，四张实机截图，把网关这点事儿说明白。
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <strong>网关总览 · 家底一眼清</strong><br>
+      <img src="docs/images/screenshot-home.jpg" alt="网关总览：请求、Token、脱敏与裁剪统计" width="240"><br>
+      请求数、Token、脱敏拦截、上下文裁剪——四个数字往那一摆，网关在忙什么就不用猜了。
+    </td>
+    <td align="center" width="50%">
+      <strong>网关接入 · 把模型递到手边</strong><br>
+      <img src="docs/images/screenshot-ingress.jpg" alt="网关接入：连接你的 AI 工具与 API 地址" width="240"><br>
+      一个地址、一把钥匙，把入池的模型交给平时顺手的 Agent，就这样。
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <strong>供应商 · 谁上谁下你说了算</strong><br>
+      <img src="docs/images/screenshot-providers.jpg" alt="供应商列表：已导入账号与 API Key，可启停" width="240"><br>
+      账号挨个排好，开关一拨就位，模型目录跟着同步。
+    </td>
+    <td align="center" width="50%">
+      <strong>隐私保护 · 敏感信息先过一道筛</strong><br>
+      <img src="docs/images/screenshot-privacy.jpg" alt="隐私保护：敏感信息脱敏规则设置" width="240"><br>
+      明文发不发、哪些字段先脱敏，决定权老老实实留在你手里。
+    </td>
+  </tr>
+</table>
+
 ## 快速开始
 
 1. 从 Releases 下载 APK，安装到 **Android 7.0（API 24）及以上**的设备。从旧版升级时，可以用同签名 APK 直接覆盖安装，保留账号和配置。
