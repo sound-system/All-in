@@ -1,0 +1,3 @@
+# Collapse the historical Eta Agent authorship onto the maintainer identity.
+# GitHub reads this file from the repository root to merge contributor identities.
+Gaeul <90267797+xunianooo@users.noreply.github.com> Eta Agent <eta@users.noreply.github.com>
